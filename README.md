@@ -1,4 +1,4 @@
-# Repo Monitor Templates
+# Repo Tracker Templates
 
 Two GitHub Actions workflow templates that watch a GitHub repo of your choosing and post a Discord notification when something new happens. Pick the one that fits what you want to track:
 
