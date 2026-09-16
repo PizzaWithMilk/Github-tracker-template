@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
-      REPO: "OWNER/REPO"                    # <-- CHANGE THIS, e.g. "CF4x99/Apparition"
+      REPO: "OWNER/REPO"                    # <-- CHANGE THIS, e.g. "ChrisTitusTech/winutil"
       PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, shown in the Discord message title
       STATE_FILE: "last_commit.txt"         # <-- CHANGE THIS if you add more than one monitor to the same repo
       PING_MODE: "user"                     # one of: user, role, everyone, none - see template-README.md
