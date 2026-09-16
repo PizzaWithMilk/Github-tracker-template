@@ -1,4 +1,4 @@
-# Repo Tracker Templates
+# Repo Monitor Templates
 
 Two GitHub Actions workflow templates that watch a GitHub repo of your choosing and post a Discord notification when something new happens. Pick the one that fits what you want to track:
 
@@ -7,22 +7,36 @@ Two GitHub Actions workflow templates that watch a GitHub repo of your choosing 
 
 You can use either one, or both, on the same repo.
 
+## Quick start
+
+1. Change the `name:` field and the `concurrency: group:` value at the top of the file so it doesn't collide with any other monitor workflow in the same repo.
+2. Fill in the `env:` block under the `monitor` job (`REPO`, `PROJECT_NAME`, `STATE_FILE`, `PING_MODE`, `PING_ID`).
+3. Add a `DISCORD_WEBHOOK` repository secret (repo **Settings → Secrets and variables → Actions → New repository secret**).
+4. Commit the file to `.github/workflows/` in any repo you control — it doesn't have to be the repo you're monitoring.
+
+The rest of this README walks through each of those in more detail.
+
 ## Setup
 
-1. **Click Add file** → Create new file. In the filename box, enter: `.github/workflows/` then name the tracker whatever you want. Make sure the name ends `.yml`
+1. **Copy the file** into `.github/workflows/` in any repo you control — it does **not** have to be the repo you're monitoring. This repo just needs to be somewhere GitHub Actions can run and commit a small state file.
 
-2. **Copy the file** into `.github/workflows/` in any repo you control — it does **not** have to be the repo you're monitoring. This repo just needs to be somewhere GitHub Actions can run and commit a small state file.
+   If that folder doesn't exist yet in your repo, you'll need to create it. Two ways:
 
-3. **Rename it to something unique.** At the top of the file, change:
+   - **On GitHub.com:** open your repo → **Add file → Create new file**. In the filename box, type the full path including the folders, e.g. `.github/workflows/release-monitor.yml` — GitHub creates `.github/` and `workflows/` automatically as soon as you type the `/` characters, you don't create folders separately. Paste in the template's contents, then commit.
+   - **On your own machine:** inside a local clone of the repo, run `mkdir -p .github/workflows`, save the template file into that folder (keep the `.yml` extension), then `git add .github/workflows/<filename>.yml`, `git commit -m "Add repo monitor"`, and `git push`.
+
+   Either way, the exact filename inside `workflows/` doesn't matter (e.g. `release-monitor.yml`, `otd-monitor.yml`) — only that it ends in `.yml` and lives in that folder.
+
+2. **Rename it to something unique.** At the top of the file, change:
    - `name:` — the workflow's display name in the Actions tab.
    - `concurrency: group:` — must be unique per monitor. If you add a second monitor to the same repo and forget to change this, the two will cancel each other out.
 
-4. **Fill in the config block** under `jobs: monitor: env:`:
+3. **Fill in the config block** under `jobs: monitor: env:`:
 
    | Variable | Meaning |
    |---|---|
-   | `REPO` | The `owner/repo` you want to watch, e.g. `ChrisTitusTech/winutil` |
-   | `PROJECT_NAME` | Display name used in the Discord message title, e.g. "winutil" |
+   | `REPO` | The `owner/repo` you want to watch, e.g. `OpenTabletDriver/OpenTabletDriver` |
+   | `PROJECT_NAME` | Display name used in the Discord message title, e.g. "OpenTabletDriver" |
    | `STATE_FILE` | Filename used to remember the last commit/release seen. Only needs changing if you add more than one monitor to the same repo — give each one a different filename. |
    | `PING_MODE` | Who gets pinged — see below |
    | `PING_ID` | A Discord user or role ID — see below |
