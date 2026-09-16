@@ -35,7 +35,7 @@ The rest of this README walks through each of those in more detail.
 
    | Variable | Meaning |
    |---|---|
-   | `REPO` | The `owner/repo` you want to watch, e.g. `ChrisTitusTech/winutil` |
+   | `REPO` | The `owner/repo` you want to watch, e.g. `OpenTabletDriver/OpenTabletDriver` |
    | `PROJECT_NAME` | Display name used in the Discord message title, e.g. "OpenTabletDriver" |
    | `STATE_FILE` | Filename used to remember the last commit/release seen. Only needs changing if you add more than one monitor to the same repo — give each one a different filename. |
    | `PING_MODE` | Who gets pinged — see below |
@@ -71,6 +71,7 @@ Both templates share the same design as the monitors this was built from:
 - Polls every 5 minutes, and catches up on everything missed since the last check (not just the single newest item) — up to 10 items per run, with a note if more landed than that.
 - The ping, title, and author/link info are sent together in one message along with as much of the notes/commit message as fits. Long ones spill into "(continued)" follow-up messages, always breaking on whole lines (bullet points, links, etc. are never cut mid-word).
 - Retries network calls a few times before giving up, and won't let two runs overlap.
+- Bare `#123` references *and* full bare PR/issue URLs are both converted into real clickable links before sending. Some projects mix both styles within one release (part hand-written, part auto-generated) — GitHub renders either form as a link on its own pages, but Discord does neither on its own, so both get normalized.
 
 ## Notes
 
