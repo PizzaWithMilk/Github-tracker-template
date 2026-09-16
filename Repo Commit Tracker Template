@@ -28,7 +28,7 @@ jobs:
       PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, shown in the Discord message title
       STATE_FILE: "last_commit.txt"         # <-- CHANGE THIS if you add more than one monitor to the same repo
       PING_MODE: "user"                     # one of: user, role, everyone, none - see template-README.md
-      PING_ID: "YOUR_DISCORD_USER_ID_HERE"  # only needed when PING_MODE is "user" or "role" 
+      PING_ID: "YOUR_DISCORD_USER_ID_HERE"  # only needed when PING_MODE is "user" or "role" Leave default when PING_MODE is set to everyone/none
 
     steps:
       - name: Checkout monitor state
