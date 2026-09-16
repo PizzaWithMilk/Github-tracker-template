@@ -2,17 +2,7 @@
 # Repo Release Monitor — TEMPLATE
 #
 # Posts a Discord notification whenever a new GitHub Release goes out on a
-# repo of your choosing. See template-README.md for full setup instructions.
-#
-# Quick start:
-#   1. Change the `name:` field below and the `concurrency: group:` value so
-#      this doesn't collide with any other monitor workflow in the same repo.
-#   2. Fill in the `env:` block under the `monitor` job (REPO, PROJECT_NAME,
-#      STATE_FILE, PING_MODE, PING_ID).
-#   3. Add a `DISCORD_WEBHOOK` repository secret (repo Settings > Secrets and
-#      variables > Actions > New repository secret).
-#   4. Commit this file to `.github/workflows/` in any repo you control (it
-#      doesn't have to be the repo you're monitoring).
+# repo of your choosing. See template-README.md for setup instructions.
 # ============================================================================
 
 name: Repo Release Monitor   # <-- CHANGE THIS to something unique, e.g. "MyProject Release Monitor"
