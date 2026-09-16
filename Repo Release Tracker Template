@@ -28,7 +28,7 @@ jobs:
       PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, shown in the Discord message title
       STATE_FILE: "last_release.txt"        # <-- CHANGE THIS if you add more than one monitor to the same repo
       PING_MODE: "user"                     # one of: user, role, everyone, none - see template-README.md
-      PING_ID: "YOUR_DISCORD_USER_ID_HERE"  # only needed when PING_MODE is "user" or "role" Leave default when PING_MODE is set to everyone/none
+      PING_ID: "YOUR_DISCORD_USER_ID_HERE"  # only needed when PING_MODE is "user" or "role"
 
     steps:
       - name: Checkout monitor state
@@ -42,6 +42,7 @@ jobs:
           python3 <<'PY'
           import json
           import os
+          import re
           import time
           import urllib.request
           import urllib.error
@@ -147,11 +148,40 @@ jobs:
                   raise
 
 
+          # GitHub auto-links bare "#123" issue/PR references AND full bare
+          # issue/PR URLs on its own pages - but that's GitHub's renderer
+          # doing the work at display time. The raw text from the API can
+          # come either way depending on how the notes were written (some
+          # projects mix both styles in one release: a hand-written section
+          # using "#123", and an auto-generated section using the full URL).
+          # Discord does neither kind of shortening/linking for bare "#123"
+          # text, so normalize both forms into a real markdown link before
+          # sending. Skips anything already inside a markdown link.
+          ISSUE_REF_PATTERN = re.compile(r"(?<![\[\w/#])#(\d+)(?!\w)")
+          ISSUE_URL_PATTERN = re.compile(
+              r"(?<!\]\()(?<!\w)https://github\.com/"
+              + re.escape(REPO)
+              + r"/(?:pull|issues)/(\d+)(?=[\s).,]|$)"
+          )
+
+
+          def linkify_issue_refs(text):
+              text = ISSUE_URL_PATTERN.sub(
+                  lambda m: f"[#{m.group(1)}]({m.group(0)})", text
+              )
+              text = ISSUE_REF_PATTERN.sub(
+                  lambda m: f"[#{m.group(1)}](https://github.com/{REPO}/issues/{m.group(1)})",
+                  text,
+              )
+              return text
+
+
           def release_meta(release):
               tag = release.get("tag_name", "").strip()
               release_url = release.get("html_url")
               author = (release.get("author") or {}).get("login", "Unknown")
               notes = (release.get("body") or "").strip() or "(No release notes.)"
+              notes = linkify_issue_refs(notes)
               return tag, release_url, author, notes
 
 
