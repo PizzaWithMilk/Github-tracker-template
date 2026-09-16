@@ -1,0 +1,336 @@
+# ============================================================================
+# Repo Commit Monitor — TEMPLATE
+#
+# Posts a Discord notification whenever new commits land on a repo of your
+# choosing. See template-README.md for full setup instructions.
+#
+# Quick start:
+#   1. Change the `name:` field below and the `concurrency: group:` value so
+#      this doesn't collide with any other monitor workflow in the same repo.
+#   2. Fill in the `env:` block under the `monitor` job (REPO, PROJECT_NAME,
+#      STATE_FILE, PING_MODE, PING_ID).
+#   3. Add a `DISCORD_WEBHOOK` repository secret (repo Settings > Secrets and
+#      variables > Actions > New repository secret).
+#   4. Commit this file to `.github/workflows/` in any repo you control (it
+#      doesn't have to be the repo you're monitoring).
+# ============================================================================
+
+name: Repo Commit Monitor   # <-- CHANGE THIS to something unique, e.g. "MyProject Commit Monitor"
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repo-commit-monitor   # <-- CHANGE THIS if you add more than one monitor to the same repo
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      REPO: "OWNER/REPO"                    # <-- CHANGE THIS, e.g. "CF4x99/Apparition"
+      PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, shown in the Discord message title
+      STATE_FILE: "last_commit.txt"         # <-- CHANGE THIS if you add more than one monitor to the same repo
+      PING_MODE: "user"                     # one of: user, role, everyone, none - see template-README.md
+      PING_ID: "YOUR_DISCORD_USER_ID_HERE"  # only needed when PING_MODE is "user" or "role"
+
+    steps:
+      - name: Checkout monitor state
+        uses: actions/checkout@v4
+
+      - name: Check for new commits
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import time
+          import urllib.request
+          import urllib.error
+          from pathlib import Path
+
+          REPO = os.environ["REPO"]
+          PROJECT_NAME = os.environ["PROJECT_NAME"]
+          API_URL = f"https://api.github.com/repos/{REPO}/commits?per_page=100"
+
+          WEBHOOK = os.environ["DISCORD_WEBHOOK"]
+          GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+          PING_MODE = os.environ.get("PING_MODE", "user").strip().lower()
+          PING_ID = os.environ.get("PING_ID", "").strip()
+
+          STATE = Path(os.environ["STATE_FILE"])
+          # Discord's "components displayable text size" limit (4000) is a TOTAL
+          # across every text component in one message, not per-component. Keep
+          # every message's total text under this budget. The first message
+          # carries the ping + header + as much of the commit message as fits;
+          # anything left over spills into continuation messages.
+          TOTAL_MESSAGE_BUDGET = 3800
+          CONTINUATION_LABEL_OVERHEAD = 80  # room for "(continued) - Part X/Y:" labels
+          MIN_CHUNK = 200  # floor so an unusually long header never stalls chunking
+          MAX_COMMITS_PER_RUN = 10  # cap so a big push/force-push can't flood the channel
+          RETRY_ATTEMPTS = 3
+          RETRY_BACKOFF_SECONDS = 3
+
+
+          def fetch_with_retry(request_factory):
+              """Run an HTTP request, retrying on transient network errors.
+              HTTPError (4xx/5xx from the server) is NOT retried - those
+              are real failures the caller should see immediately."""
+              last_error = None
+              for attempt in range(1, RETRY_ATTEMPTS + 1):
+                  try:
+                      req = request_factory()
+                      with urllib.request.urlopen(req, timeout=30) as response:
+                          return response.read()
+                  except urllib.error.HTTPError:
+                      raise
+                  except (urllib.error.URLError, TimeoutError) as error:
+                      last_error = error
+                      print(f"Attempt {attempt}/{RETRY_ATTEMPTS} failed: {error}")
+                      if attempt < RETRY_ATTEMPTS:
+                          time.sleep(RETRY_BACKOFF_SECONDS * attempt)
+              raise last_error
+
+
+          def get_recent_commits():
+              def build_request():
+                  headers = {
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "GitHub-Discord-Monitor/1.0",
+                  }
+                  if GITHUB_TOKEN:
+                      headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+                  return urllib.request.Request(API_URL, headers=headers)
+
+              body = fetch_with_retry(build_request)
+              return json.loads(body)  # newest first
+
+
+          def build_ping():
+              """Returns (ping_text, allowed_mentions) for the configured PING_MODE."""
+              if PING_MODE == "user" and PING_ID:
+                  return f"<@{PING_ID}>", {"users": [PING_ID]}
+              if PING_MODE == "role" and PING_ID:
+                  return f"<@&{PING_ID}>", {"roles": [PING_ID]}
+              if PING_MODE == "everyone":
+                  return "@everyone", {"parse": ["everyone"]}
+              return "", {}
+
+
+          def send_discord(components, allowed_mentions=None):
+              separator = "&" if "?" in WEBHOOK else "?"
+              url = f"{WEBHOOK}{separator}wait=true&with_components=true"
+
+              payload = {
+                  "flags": 32768,  # IS_COMPONENTS_V2
+                  "allowed_mentions": allowed_mentions or {},
+                  "components": components,
+              }
+              body = json.dumps(payload).encode("utf-8")
+
+              def build_request():
+                  return urllib.request.Request(
+                      url,
+                      data=body,
+                      headers={
+                          "Content-Type": "application/json",
+                          "User-Agent": "GitHub-Discord-Monitor/1.0",
+                      },
+                      method="POST",
+                  )
+
+              try:
+                  fetch_with_retry(build_request)
+              except urllib.error.HTTPError as error:
+                  error_body = error.read().decode("utf-8", errors="replace")
+                  print(f"Discord error HTTP {error.code}: {error_body}")
+                  raise
+
+
+          def commit_meta(commit):
+              sha = commit["sha"]
+              short_sha = sha[:7]
+              commit_url = commit["html_url"]
+              author = commit.get("author") or {}
+              author_name = (
+                  author.get("login")
+                  or commit["commit"]["author"].get("name", "Unknown")
+              )
+              message = commit["commit"]["message"].strip() or "(No commit message.)"
+              return short_sha, commit_url, author_name, message
+
+
+          def split_long_line(line, capacity):
+              """Break a single line into pieces on whitespace only, each
+              <= capacity. Never cuts a word or a link in half. Only used as a
+              fallback for the rare line too long to fit in an empty chunk on
+              its own (e.g. one giant unbroken paragraph)."""
+              if len(line) <= capacity:
+                  return [line]
+              pieces = []
+              remaining = line
+              while len(remaining) > capacity:
+                  cut = remaining.rfind(" ", 0, capacity + 1)
+                  if cut <= 0:
+                      cut = capacity
+                  pieces.append(remaining[:cut].rstrip())
+                  remaining = remaining[cut:].lstrip()
+              if remaining:
+                  pieces.append(remaining)
+              return pieces
+
+
+          def chunk_body(text, first_capacity, rest_capacity):
+              """Pack text into message-sized chunks along LINE boundaries, so
+              a bullet point (and any link inside it) always stays whole - a
+              line that doesn't fit in what's left of the current message
+              moves to the next one entirely, rather than being sliced."""
+              atom_capacity = max(min(first_capacity, rest_capacity), MIN_CHUNK)
+              atoms = []
+              for line in text.split("\n"):
+                  atoms.extend(split_long_line(line, atom_capacity))
+
+              chunks = []
+              current = []
+              current_len = 0
+              capacity = max(first_capacity, MIN_CHUNK)
+
+              for atom in atoms:
+                  added = len(atom) + (1 if current else 0)
+                  if current and current_len + added > capacity:
+                      chunks.append("\n".join(current))
+                      current = []
+                      current_len = 0
+                      capacity = max(rest_capacity, MIN_CHUNK)
+                      added = len(atom)
+                  current.append(atom)
+                  current_len += added
+
+              if current:
+                  chunks.append("\n".join(current))
+
+              return chunks or [text]
+
+
+          def send_commit(commit, ping, note=None):
+              short_sha, commit_url, author_name, message = commit_meta(commit)
+
+              title = f"## {PROJECT_NAME} Updated!"
+              meta_lines = (
+                  f"**Author:** {author_name}\n"
+                  f"**Commit:** `{short_sha}`\n"
+                  f"**Link:** {commit_url}"
+              )
+              meta_block = f"{note}\n\n{meta_lines}" if note else meta_lines
+
+              ping_text, ping_mentions = build_ping() if ping else ("", {})
+
+              first_overhead = len(ping_text) + len(title) + len(meta_block) + len("## Change Log:\n")
+              first_capacity = TOTAL_MESSAGE_BUDGET - first_overhead
+              rest_capacity = TOTAL_MESSAGE_BUDGET - CONTINUATION_LABEL_OVERHEAD
+
+              chunks = chunk_body(message, first_capacity, rest_capacity)
+              total = len(chunks)
+
+              for index, chunk in enumerate(chunks, start=1):
+                  components = []
+                  mentions = {}
+                  if index == 1:
+                      if ping_text:
+                          components.append({"type": 10, "content": ping_text})
+                          mentions = ping_mentions
+                      components.append({
+                          "type": 17,
+                          "components": [
+                              {"type": 10, "content": title},
+                              {"type": 14, "spacing": 1},
+                              {"type": 10, "content": meta_block},
+                              {"type": 14, "spacing": 2},
+                              {"type": 10, "content": f"## Change Log:\n{chunk}"},
+                          ],
+                      })
+                  else:
+                      heading = f"## Change Log (continued) — Part {index}/{total}:"
+                      components.append({
+                          "type": 17,
+                          "components": [{"type": 10, "content": f"{heading}\n{chunk}"}],
+                      })
+                  send_discord(components, mentions)
+
+
+          def main():
+              commits = get_recent_commits()
+              if not commits:
+                  print("No commits returned from API.")
+                  return
+
+              latest_sha = commits[0]["sha"]
+              old_sha = STATE.read_text().strip() if STATE.exists() else ""
+
+              if latest_sha == old_sha:
+                  print("No new commit.")
+                  return
+
+              if not old_sha:
+                  new_commits = [commits[0]]
+                  gap = False
+              else:
+                  sha_index = {c["sha"]: i for i, c in enumerate(commits)}
+                  if old_sha in sha_index:
+                      new_commits = commits[:sha_index[old_sha]]
+                      new_commits.reverse()
+                      gap = False
+                  else:
+                      new_commits = [commits[0]]
+                      gap = True
+
+              overflow = 0
+              if len(new_commits) > MAX_COMMITS_PER_RUN:
+                  overflow = len(new_commits) - MAX_COMMITS_PER_RUN
+                  new_commits = new_commits[-MAX_COMMITS_PER_RUN:]
+
+              print(
+                  f"New commits to report: {len(new_commits)}"
+                  + (f", {overflow} more not shown individually" if overflow else "")
+                  + (", gap detected (older commit not found in history)" if gap else "")
+              )
+
+              note = None
+              if gap:
+                  note = "_Could not find the last-seen commit in recent history - showing the latest commit only._"
+              elif overflow:
+                  note = f"_{overflow} earlier commit(s) in this batch were not posted individually._"
+
+              for i, commit in enumerate(new_commits):
+                  send_commit(commit, ping=(i == 0), note=(note if i == 0 else None))
+
+              STATE.write_text(latest_sha + "\n")
+              print("Discord notification(s) sent and state saved.")
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+      - name: Save monitor state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add "$STATE_FILE"
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update $STATE_FILE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push
+          fi
