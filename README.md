@@ -9,7 +9,7 @@ You can use either one, or both, on the same repo.
 
 ## Setup
 
-1. **Click Add file** → Create new file. In the filename box, enter: `.github/workflows/` then name the tracker whatever you want.
+1. **Click Add file** → Create new file. In the filename box, enter: `.github/workflows/` then name the tracker whatever you want. Make sure the name ends `.yml`
 
 2. **Copy the file** into `.github/workflows/` in any repo you control — it does **not** have to be the repo you're monitoring. This repo just needs to be somewhere GitHub Actions can run and commit a small state file.
 
