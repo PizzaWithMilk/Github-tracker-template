@@ -35,7 +35,7 @@ The rest of this README walks through each of those in more detail.
 
    | Variable | Meaning |
    |---|---|
-   | `REPO` | The `owner/repo` you want to watch, e.g. `OpenTabletDriver/OpenTabletDriver` |
+   | `REPO` | The `owner/repo` you want to watch, e.g. `ChrisTitusTech/winutil` |
    | `PROJECT_NAME` | Display name used in the Discord message title, e.g. "OpenTabletDriver" |
    | `STATE_FILE` | Filename used to remember the last commit/release seen. Only needs changing if you add more than one monitor to the same repo — give each one a different filename. |
    | `PING_MODE` | Who gets pinged — see below |
