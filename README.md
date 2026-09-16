@@ -9,18 +9,20 @@ You can use either one, or both, on the same repo.
 
 ## Setup
 
-1. **Copy the file** into `.github/workflows/` in any repo you control — it does **not** have to be the repo you're monitoring. This repo just needs to be somewhere GitHub Actions can run and commit a small state file.
+1. **Click Add file** → Create new file. In the filename box, enter: `.github/workflows/` then name the tracker whatever you want.
 
-2. **Rename it to something unique.** At the top of the file, change:
+2. **Copy the file** into `.github/workflows/` in any repo you control — it does **not** have to be the repo you're monitoring. This repo just needs to be somewhere GitHub Actions can run and commit a small state file.
+
+3. **Rename it to something unique.** At the top of the file, change:
    - `name:` — the workflow's display name in the Actions tab.
    - `concurrency: group:` — must be unique per monitor. If you add a second monitor to the same repo and forget to change this, the two will cancel each other out.
 
-3. **Fill in the config block** under `jobs: monitor: env:`:
+4. **Fill in the config block** under `jobs: monitor: env:`:
 
    | Variable | Meaning |
    |---|---|
-   | `REPO` | The `owner/repo` you want to watch, e.g. `OpenTabletDriver/OpenTabletDriver` |
-   | `PROJECT_NAME` | Display name used in the Discord message title, e.g. "OpenTabletDriver" |
+   | `REPO` | The `owner/repo` you want to watch, e.g. `ChrisTitusTech/winutil` |
+   | `PROJECT_NAME` | Display name used in the Discord message title, e.g. "winutil" |
    | `STATE_FILE` | Filename used to remember the last commit/release seen. Only needs changing if you add more than one monitor to the same repo — give each one a different filename. |
    | `PING_MODE` | Who gets pinged — see below |
    | `PING_ID` | A Discord user or role ID — see below |
