@@ -22,13 +22,14 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       REPO: "OWNER/REPO"                    # <-- CHANGE THIS, e.g. "ChrisTitusTech/winutil"
       PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, shown in the Discord message title, e.g. "winutil"
       STATE_FILE: "last_release.txt"        # <-- CHANGE THIS if you add more than one monitor to the same repo
       PING_MODE: "user"                     # one of: user, role, everyone, none - see README.md
       PING_ID: "YOUR_DISCORD_USER_ID_HERE"  # only needed when PING_MODE is "user" or "role" Leave default when PING_MODE is set to everyone/none
+      NOTIFY_ON_INITIAL_RUN: "true"         # set to "false" to silently record the current latest release on first run instead of posting/pinging about it
 
     steps:
       - name: Checkout monitor state
@@ -56,6 +57,7 @@ jobs:
           GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
           PING_MODE = os.environ.get("PING_MODE", "user").strip().lower()
           PING_ID = os.environ.get("PING_ID", "").strip()
+          NOTIFY_ON_INITIAL_RUN = os.environ.get("NOTIFY_ON_INITIAL_RUN", "true").strip().lower() not in ("false", "0", "no")
 
           STATE = Path(os.environ["STATE_FILE"])
           # Discord enforces two independent budgets per message: total text
@@ -68,28 +70,51 @@ jobs:
           CONTINUATION_LABEL_OVERHEAD = 80  # room for "(continued) - Part X/Y:" labels
           MIN_CHUNK = 200  # floor so an unusually long header never stalls chunking
           MAX_RELEASES_PER_RUN = 10  # cap so a bulk-import of releases can't flood the channel
-          RETRY_ATTEMPTS = 3
+          RETRY_ATTEMPTS = 3          # attempts for plain network errors (timeouts, DNS, etc.)
           RETRY_BACKOFF_SECONDS = 3
+          RATE_LIMIT_RETRY_ATTEMPTS = 5   # attempts specifically for HTTP 429 (rate limited)
+          RATE_LIMIT_MAX_WAIT_SECONDS = 15  # cap per-wait even if Retry-After asks for longer
+          DISCORD_SEND_DELAY_SECONDS = 0.5  # minimum gap between consecutive Discord messages
 
 
           def fetch_with_retry(request_factory):
-              """Run an HTTP request, retrying on transient network errors.
-              HTTPError (4xx/5xx from the server) is NOT retried - those
-              are real failures the caller should see immediately."""
+              """Run an HTTP request, retrying on transient network errors and
+              on HTTP 429 (rate limited) responses - both GitHub and Discord can
+              return 429 when this script sends several messages back-to-back
+              for a chunked or batched notification. Any other HTTPError
+              (4xx/5xx) is NOT retried - those are real failures the caller
+              should see immediately."""
               last_error = None
-              for attempt in range(1, RETRY_ATTEMPTS + 1):
+              network_attempt = 0
+              rate_limit_attempt = 0
+              while True:
+                  network_attempt += 1
                   try:
                       req = request_factory()
                       with urllib.request.urlopen(req, timeout=30) as response:
                           return response.read()
-                  except urllib.error.HTTPError:
+                  except urllib.error.HTTPError as error:
+                      if error.code == 429 and rate_limit_attempt < RATE_LIMIT_RETRY_ATTEMPTS:
+                          rate_limit_attempt += 1
+                          retry_after = error.headers.get("Retry-After") if error.headers else None
+                          try:
+                              wait = float(retry_after)
+                          except (TypeError, ValueError):
+                              wait = RETRY_BACKOFF_SECONDS * rate_limit_attempt
+                          wait = min(max(wait, 0), RATE_LIMIT_MAX_WAIT_SECONDS)
+                          print(f"Rate limited (429), waiting {wait:.1f}s before retry "
+                                f"({rate_limit_attempt}/{RATE_LIMIT_RETRY_ATTEMPTS})")
+                          time.sleep(wait)
+                          last_error = error
+                          continue
                       raise
                   except (urllib.error.URLError, TimeoutError) as error:
                       last_error = error
-                      print(f"Attempt {attempt}/{RETRY_ATTEMPTS} failed: {error}")
-                      if attempt < RETRY_ATTEMPTS:
-                          time.sleep(RETRY_BACKOFF_SECONDS * attempt)
-              raise last_error
+                      print(f"Attempt {network_attempt}/{RETRY_ATTEMPTS} failed: {error}")
+                      if network_attempt < RETRY_ATTEMPTS:
+                          time.sleep(RETRY_BACKOFF_SECONDS * network_attempt)
+                      else:
+                          raise last_error
 
 
           def get_recent_releases():
@@ -97,6 +122,7 @@ jobs:
                   headers = {
                       "Accept": "application/vnd.github+json",
                       "User-Agent": "GitHub-Discord-Monitor/1.0",
+                      "X-GitHub-Api-Version": "2022-11-28",
                   }
                   if GITHUB_TOKEN:
                       headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
@@ -119,7 +145,20 @@ jobs:
               return "", {}
 
 
+          _last_discord_send_at = {"t": None}
+
+
           def send_discord(components, allowed_mentions=None):
+              # Throttle to at least DISCORD_SEND_DELAY_SECONDS between sends.
+              # A single long release, or a batch of several releases, can
+              # produce many messages in a row; without spacing them out this
+              # reliably trips Discord's webhook rate limit.
+              last_sent = _last_discord_send_at["t"]
+              if last_sent is not None:
+                  elapsed = time.monotonic() - last_sent
+                  if elapsed < DISCORD_SEND_DELAY_SECONDS:
+                      time.sleep(DISCORD_SEND_DELAY_SECONDS - elapsed)
+
               separator = "&" if "?" in WEBHOOK else "?"
               url = f"{WEBHOOK}{separator}wait=true&with_components=true"
 
@@ -147,6 +186,8 @@ jobs:
                   error_body = error.read().decode("utf-8", errors="replace")
                   print(f"Discord error HTTP {error.code}: {error_body}")
                   raise
+              finally:
+                  _last_discord_send_at["t"] = time.monotonic()
 
 
           # GitHub auto-links bare "#123" issue/PR references AND full bare
@@ -364,7 +405,13 @@ jobs:
                   print("No new release.")
                   return
 
+              STATE.parent.mkdir(parents=True, exist_ok=True)
+
               if not old_tag:
+                  if not NOTIFY_ON_INITIAL_RUN:
+                      STATE.write_text(latest_tag + "\n")
+                      print("First run: recording latest release without sending a notification.")
+                      return
                   new_releases = [releases[0]]
                   gap = False
               else:
@@ -396,8 +443,12 @@ jobs:
 
               for i, release in enumerate(new_releases):
                   send_release(release, ping=(i == 0), note=(note if i == 0 else None))
+                  # Save progress after each release, not just at the end, so a
+                  # failure partway through a batch (e.g. a Discord outage)
+                  # doesn't cause already-posted releases to be reposted on
+                  # the next run.
+                  STATE.write_text(release.get("tag_name", "").strip() + "\n")
 
-              STATE.write_text(latest_tag + "\n")
               print("Discord notification(s) sent and state saved.")
 
 
@@ -406,6 +457,7 @@ jobs:
           PY
 
       - name: Save monitor state
+        if: ${{ !cancelled() }}   # still commit partial progress if the previous step failed partway through a batch; skip only on cancellation
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
