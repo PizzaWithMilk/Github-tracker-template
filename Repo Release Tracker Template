@@ -2,7 +2,7 @@
 # Repo Release Monitor — TEMPLATE
 #
 # Posts a Discord notification whenever a new GitHub Release goes out on a
-# repo of your choosing. See template-README.md for setup instructions.
+# repo of your choosing. See README.md for setup instructions.
 # ============================================================================
 
 name: Repo Release Monitor   # <-- CHANGE THIS to something unique, e.g. "MyProject Release Monitor"
@@ -58,12 +58,13 @@ jobs:
           PING_ID = os.environ.get("PING_ID", "").strip()
 
           STATE = Path(os.environ["STATE_FILE"])
-          # Discord's "components displayable text size" limit (4000) is a TOTAL
-          # across every text component in one message, not per-component. Keep
-          # every message's total text under this budget. The first message
-          # carries the ping + header + as much of the notes as fits; anything
-          # left over spills into continuation messages.
+          # Discord enforces two independent budgets per message: total text
+          # across every component (~4000 chars) and total component count,
+          # nested included (40). Stay comfortably under both.
           TOTAL_MESSAGE_BUDGET = 3800
+          MAX_TOTAL_COMPONENTS = 36
+          FIRST_FIXED_COMPONENTS = 6         # ping, container, title, sep, meta, sep
+          CONTINUATION_FIXED_COMPONENTS = 1  # container
           CONTINUATION_LABEL_OVERHEAD = 80  # room for "(continued) - Part X/Y:" labels
           MIN_CHUNK = 200  # floor so an unusually long header never stalls chunking
           MAX_RELEASES_PER_RUN = 10  # cap so a bulk-import of releases can't flood the channel
@@ -185,6 +186,13 @@ jobs:
               return tag, release_url, author, notes
 
 
+          HEADING_PATTERN = re.compile(r"^#{1,6}\s+\S")
+
+
+          def is_heading_line(line):
+              return bool(HEADING_PATTERN.match(line))
+
+
           def split_long_line(line, capacity):
               """Break a single line into pieces on whitespace only, each
               <= capacity. Never cuts a word or a link in half. Only used as a
@@ -205,36 +213,85 @@ jobs:
               return pieces
 
 
-          def chunk_body(text, first_capacity, rest_capacity):
-              """Pack text into message-sized chunks along LINE boundaries, so
-              a bullet point (and any link inside it) always stays whole - a
-              line that doesn't fit in what's left of the current message
-              moves to the next one entirely, rather than being sliced."""
-              atom_capacity = max(min(first_capacity, rest_capacity), MIN_CHUNK)
-              atoms = []
+          def pack_messages(text, first_text_capacity, rest_text_capacity,
+                             first_component_capacity, rest_component_capacity):
+              """Pack text into one or more Discord messages, keeping both the
+              total text length and the total component count under Discord's
+              per-message limits. Each returned message is a list of
+              ("text", str) / ("sep", None) pieces.
+
+              A markdown heading the changelog itself defines (e.g.
+              "## Features") stays merged with the content that follows it in
+              one text component, but a separator is inserted BEFORE every
+              such heading - matching how GitHub visually divides sections -
+              except the very first piece of text in the very first message,
+              which the caller merges with its own leading heading instead.
+
+              A bullet point or heading that doesn't fit in what's left of the
+              current message moves to the next one whole; a single line too
+              long to ever fit on its own falls back to word-wrapping."""
+              atom_capacity = max(min(first_text_capacity, rest_text_capacity), MIN_CHUNK)
+
+              atoms = []  # (text, starts_a_new_heading_section)
               for line in text.split("\n"):
-                  atoms.extend(split_long_line(line, atom_capacity))
+                  pieces = split_long_line(line, atom_capacity)
+                  heading = is_heading_line(line)
+                  for i, piece in enumerate(pieces):
+                      atoms.append((piece, heading and i == 0))
 
-              chunks = []
-              current = []
-              current_len = 0
-              capacity = max(first_capacity, MIN_CHUNK)
+              messages = []
+              current_msg = []
+              current_text = []
+              msg_text_len = 0
+              msg_component_count = 0
+              text_capacity = max(first_text_capacity, MIN_CHUNK)
+              component_capacity = max(first_component_capacity, 1)
+              first_atom = True
 
-              for atom in atoms:
-                  added = len(atom) + (1 if current else 0)
-                  if current and current_len + added > capacity:
-                      chunks.append("\n".join(current))
-                      current = []
-                      current_len = 0
-                      capacity = max(rest_capacity, MIN_CHUNK)
-                      added = len(atom)
-                  current.append(atom)
-                  current_len += added
+              def close_text():
+                  nonlocal msg_component_count
+                  if current_text:
+                      current_msg.append(("text", "\n".join(current_text)))
+                      current_text.clear()
+                      msg_component_count += 1
 
-              if current:
-                  chunks.append("\n".join(current))
+              def close_message():
+                  nonlocal msg_text_len, msg_component_count, text_capacity, component_capacity
+                  close_text()
+                  if current_msg:
+                      messages.append(list(current_msg))
+                      current_msg.clear()
+                  msg_text_len = 0
+                  msg_component_count = 0
+                  text_capacity = max(rest_text_capacity, MIN_CHUNK)
+                  component_capacity = max(rest_component_capacity, 1)
 
-              return chunks or [text]
+              for atom_text, starts_heading in atoms:
+                  if starts_heading and not first_atom:
+                      pending_close_cost = 1 if current_text else 0
+                      projected_components = msg_component_count + pending_close_cost + 1  # +1 for the separator
+                      if (msg_text_len + len(atom_text) > text_capacity
+                              or projected_components > component_capacity):
+                          close_message()
+                      else:
+                          close_text()
+                          current_msg.append(("sep", None))
+                          msg_component_count += 1
+                      current_text.append(atom_text)
+                      msg_text_len += len(atom_text)
+                  else:
+                      joined_len = len(atom_text) + (1 if current_text else 0)
+                      if msg_text_len + joined_len > text_capacity:
+                          close_message()
+                          current_text.append(atom_text)
+                          msg_text_len += len(atom_text)
+                      else:
+                          current_text.append(atom_text)
+                          msg_text_len += joined_len
+                  first_atom = False
+
+              close_message()
+              return messages or [[("text", text)]]
 
 
           def send_release(release, ping, note=None):
@@ -250,36 +307,47 @@ jobs:
 
               ping_text, ping_mentions = build_ping() if ping else ("", {})
 
-              first_overhead = len(ping_text) + len(title) + len(meta_block) + len("## Release Notes:\n")
-              first_capacity = TOTAL_MESSAGE_BUDGET - first_overhead
-              rest_capacity = TOTAL_MESSAGE_BUDGET - CONTINUATION_LABEL_OVERHEAD
+              notes_heading = "## Release Notes:"
+              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(notes_heading)
+              first_text_capacity = TOTAL_MESSAGE_BUDGET - first_overhead
+              rest_text_capacity = TOTAL_MESSAGE_BUDGET - CONTINUATION_LABEL_OVERHEAD
+              first_component_capacity = MAX_TOTAL_COMPONENTS - FIRST_FIXED_COMPONENTS
+              rest_component_capacity = MAX_TOTAL_COMPONENTS - CONTINUATION_FIXED_COMPONENTS
 
-              chunks = chunk_body(notes, first_capacity, rest_capacity)
-              total = len(chunks)
+              messages = pack_messages(
+                  notes, first_text_capacity, rest_text_capacity,
+                  first_component_capacity, rest_component_capacity,
+              )
+              total = len(messages)
 
-              for index, chunk in enumerate(chunks, start=1):
+              for index, pieces in enumerate(messages, start=1):
                   components = []
                   mentions = {}
+                  if index == 1 and ping_text:
+                      components.append({"type": 10, "content": ping_text})
+                      mentions = ping_mentions
+
+                  container = []
                   if index == 1:
-                      if ping_text:
-                          components.append({"type": 10, "content": ping_text})
-                          mentions = ping_mentions
-                      components.append({
-                          "type": 17,
-                          "components": [
-                              {"type": 10, "content": title},
-                              {"type": 14, "spacing": 1},
-                              {"type": 10, "content": meta_block},
-                              {"type": 14, "spacing": 2},
-                              {"type": 10, "content": f"## Release Notes:\n{chunk}"},
-                          ],
-                      })
+                      container.append({"type": 10, "content": title})
+                      container.append({"type": 14, "spacing": 1})
+                      container.append({"type": 10, "content": meta_block})
+                      container.append({"type": 14, "spacing": 1})
+                      heading_prefix = notes_heading
                   else:
-                      heading = f"## Release Notes (continued) — Part {index}/{total}:"
-                      components.append({
-                          "type": 17,
-                          "components": [{"type": 10, "content": f"{heading}\n{chunk}"}],
-                      })
+                      heading_prefix = f"## Release Notes (continued) — Part {index}/{total}:"
+
+                  first_text_done = False
+                  for kind, content in pieces:
+                      if kind == "sep":
+                          container.append({"type": 14, "spacing": 2})
+                      else:
+                          if not first_text_done:
+                              content = f"{heading_prefix}\n{content}"
+                              first_text_done = True
+                          container.append({"type": 10, "content": content})
+
+                  components.append({"type": 17, "components": container})
                   send_discord(components, mentions)
 
 
