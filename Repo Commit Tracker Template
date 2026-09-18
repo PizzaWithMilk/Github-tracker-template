@@ -60,9 +60,7 @@ jobs:
           NOTIFY_ON_INITIAL_RUN = os.environ.get("NOTIFY_ON_INITIAL_RUN", "true").strip().lower() not in ("false", "0", "no")
 
           STATE = Path(os.environ["STATE_FILE"])
-          # Discord enforces two independent budgets per message: total text
-          # across every component (~4000 chars) and total component count,
-          # nested included (40). Stay comfortably under both.
+          # Stay comfortably under Discord's per-message limits (~4000 total text chars, 40 components).
           TOTAL_MESSAGE_BUDGET = 3800
           MAX_TOTAL_COMPONENTS = 36
           FIRST_FIXED_COMPONENTS = 6         # ping, container, title, sep, meta, sep
@@ -78,12 +76,7 @@ jobs:
 
 
           def fetch_with_retry(request_factory):
-              """Run an HTTP request, retrying on transient network errors and
-              on HTTP 429 (rate limited) responses - both GitHub and Discord can
-              return 429 when this script sends several messages back-to-back
-              for a chunked or batched notification. Any other HTTPError
-              (4xx/5xx) is NOT retried - those are real failures the caller
-              should see immediately."""
+              """Retry on network errors and HTTP 429; any other HTTPError is raised immediately."""
               last_error = None
               network_attempt = 0
               rate_limit_attempt = 0
@@ -147,10 +140,7 @@ jobs:
 
 
           def send_discord(components, allowed_mentions=None):
-              # Throttle to at least DISCORD_SEND_DELAY_SECONDS between sends.
-              # A single long commit message, or a batch of several commits,
-              # can produce many messages in a row; without spacing them out
-              # this reliably trips Discord's webhook rate limit.
+              # Throttle sends to avoid tripping Discord's rate limit.
               last_sent = _last_discord_send_at["t"]
               if last_sent is not None:
                   elapsed = time.monotonic() - last_sent
@@ -188,15 +178,7 @@ jobs:
                   _last_discord_send_at["t"] = time.monotonic()
 
 
-          # GitHub auto-links bare "#123" issue/PR references AND full bare
-          # issue/PR URLs on its own pages - but that's GitHub's renderer
-          # doing the work at display time. The raw text from the API can
-          # come either way depending on how the message was written (some
-          # projects mix both styles: e.g. a hand-written section using
-          # "#123", and an auto-generated section using the full URL).
-          # Discord does neither kind of shortening/linking for bare "#123"
-          # text, so normalize both forms into a real markdown link before
-          # sending. Skips anything already inside a markdown link.
+          # Convert bare "#123" refs and bare issue/PR URLs into real links (Discord doesn't auto-link either).
           ISSUE_REF_PATTERN = re.compile(r"(?<![\[\w/#])#(\d+)(?!\w)")
           ISSUE_URL_PATTERN = re.compile(
               r"(?<!\]\()(?<!\w)https://github\.com/"
@@ -238,10 +220,7 @@ jobs:
 
 
           def split_long_line(line, capacity):
-              """Break a single line into pieces on whitespace only, each
-              <= capacity. Never cuts a word or a link in half. Only used as a
-              fallback for the rare line too long to fit in an empty chunk on
-              its own (e.g. one giant unbroken paragraph)."""
+              """Break a line into pieces <= capacity, splitting on whitespace only."""
               if len(line) <= capacity:
                   return [line]
               pieces = []
@@ -259,21 +238,7 @@ jobs:
 
           def pack_messages(text, first_text_capacity, rest_text_capacity,
                              first_component_capacity, rest_component_capacity):
-              """Pack text into one or more Discord messages, keeping both the
-              total text length and the total component count under Discord's
-              per-message limits. Each returned message is a list of
-              ("text", str) / ("sep", None) pieces.
-
-              A markdown heading the commit message itself defines stays
-              merged with the content that follows it in one text component,
-              but a separator is inserted BEFORE every such heading - matching
-              how GitHub visually divides sections - except the very first
-              piece of text in the very first message, which the caller merges
-              with its own leading heading instead.
-
-              A bullet point or heading that doesn't fit in what's left of the
-              current message moves to the next one whole; a single line too
-              long to ever fit on its own falls back to word-wrapping."""
+              """Pack text into Discord messages (lists of ("text", str)/("sep", None) pieces) under Discord's per-message limits."""
               atom_capacity = max(min(first_text_capacity, rest_text_capacity), MIN_CHUNK)
 
               atoms = []  # (text, starts_a_new_heading_section)
@@ -446,10 +411,7 @@ jobs:
 
               for i, commit in enumerate(new_commits):
                   send_commit(commit, ping=(i == 0), note=(note if i == 0 else None))
-                  # Save progress after each commit, not just at the end, so a
-                  # failure partway through a batch (e.g. a Discord outage)
-                  # doesn't cause already-posted commits to be reposted on
-                  # the next run.
+                  # Save after each commit so a mid-batch failure can't cause a repost.
                   STATE.write_text(commit["sha"] + "\n")
 
               print("Discord notification(s) sent and state saved.")
