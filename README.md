@@ -1,16 +1,18 @@
 # Repo Monitor Templates
 
-Two GitHub Actions workflow templates that watch a GitHub repo of your choosing and post a Discord notification when something new happens. Pick the one that fits what you want to track:
+GitHub Actions workflow templates that watch a GitHub repo of your choosing and post a Discord notification when something new happens. There are four templates — pick based on what you want to track and which kind of Discord channel you're posting into:
 
-- **`repo-release-monitor-template.yml`** — notifies on new GitHub Releases (version tags, release notes).
-- **`repo-commit-monitor-template.yml`** — notifies on new commits (any commit pushed to the default branch).
+|  | Notifies on | Regular text channel | Forum channel |
+|---|---|---|---|
+| **Releases** | New GitHub Releases (version tags, release notes) | `repo-release-monitor-template.yml` | `Repo_Release_Tracker_Template_Forum_Channel.yml` |
+| **Commits** | New commits pushed to the default branch | `repo-commit-monitor-template.yml` | `Repo_Commit_Tracker_Template_Forum_Channel.yml` |
 
-You can use either one, or both, on the same repo.
+Everything in this README applies to all four unless a section says otherwise. The [Forum channel behavior](#forum-channel-behavior) section covers what's different about the forum versions. You can run any number of these together on the same repo — e.g. releases into a forum channel and commits into a regular one.
 
 ## Quick start
 
 1. Change the `name:` field and the `concurrency: group:` value at the top of the file so it doesn't collide with any other monitor workflow in the same repo.
-2. Fill in the `env:` block under the `monitor` job (`REPO`, `PROJECT_NAME`, `STATE_FILE`, `PING_MODE`, `PING_ID`).
+2. Fill in the `env:` block under the `monitor` job (`REPO`, `PROJECT_NAME`, `STATE_FILE`, `PING_MODE`, `PING_ID`, and `THREAD_STATE_FILE` for forum-channel templates).
 3. Add a `DISCORD_WEBHOOK` repository secret (repo **Settings → Secrets and variables → Actions → New repository secret**).
 4. Commit the file to `.github/workflows/` in any repo you control — it doesn't have to be the repo you're monitoring.
 
@@ -38,11 +40,14 @@ The rest of this README walks through each of those in more detail.
    | `REPO` | The `owner/repo` you want to watch, e.g. `ChrisTitusTech/winutil` |
    | `PROJECT_NAME` | Display name used in the Discord message title, e.g. "winutil" |
    | `STATE_FILE` | Filename used to remember the last commit/release seen. Only needs changing if you add more than one monitor to the same repo — give each one a different filename. Can include a subfolder (e.g. `state/last_release.txt`) — the folder is created automatically if it doesn't exist yet. |
+   | `THREAD_STATE_FILE` | *Forum-channel templates only.* Filename used to remember an in-progress forum post if a run fails partway through, so the next run resumes posting into that same thread instead of creating a duplicate one. Same rules as `STATE_FILE` — give each monitor its own unique filename. |
    | `PING_MODE` | Who gets pinged — see below |
    | `PING_ID` | A Discord user or role ID — see below |
    | `NOTIFY_ON_INITIAL_RUN` | `"true"` (default) or `"false"` — see [First run behavior](#first-run-behavior) below |
 
 4. **Add the webhook secret.** In the repo you copied the file into: **Settings → Secrets and variables → Actions → New repository secret**, name it `DISCORD_WEBHOOK`, and paste in your Discord webhook URL (Discord channel → Edit Channel → Integrations → Webhooks).
+
+   > **Using a forum-channel template?** Create the webhook on the **Forum channel itself** — right-click the forum channel (or its Channel Settings) → Integrations → Webhooks — not on a text channel or a specific thread inside it. A forum channel's webhook behaves differently from a text channel's, so pointing the wrong template at the wrong webhook will fail on the first post (see [Troubleshooting](#troubleshooting)).
 
    Treat this URL like a password — anyone who has it can post to your channel. It only needs to live in the repo secret; it's never printed to logs or committed anywhere.
 
@@ -92,6 +97,15 @@ Only the *first* item in a batch gets pinged and carries the note; the rest post
 
 **State is saved incrementally, after each item in a batch — not just once at the end.** If Discord or the GitHub API has a hiccup partway through a batch of, say, 5 releases, the ones that already posted successfully are remembered, so the next run resumes from where it left off instead of reposting them.
 
+### Forum channel behavior
+
+*(Applies only to the two forum-channel templates.)* Everything above works the same way, with one structural difference: **each new release or commit becomes its own forum post (thread)**, instead of a message dropped into a shared channel.
+
+- The thread's title is `{PROJECT_NAME} Updated! — {tag}` for releases, or `{PROJECT_NAME} Updated! — Commit {short SHA}` for commits — truncated to Discord's 100-character forum title limit if it runs long.
+- If one release/commit's notes need more than one message, the "(continued)" follow-ups are posted as replies inside that same thread, not as new posts.
+- In a batch of several new releases/commits, each one gets its *own* thread — 3 new releases means 3 new forum posts, not one post with 3 messages. The ping still only fires once, on the first (oldest) thread in the batch.
+- **Resume-safe by design:** before sending each continuation message, the thread ID and next part number are saved to `THREAD_STATE_FILE`. If a run fails partway through posting a long item (e.g. Discord errors out on message 2 of 3), the next run reads that file and resumes posting into the *same* thread starting from the part that failed — rather than creating a duplicate post. The progress file is cleared automatically once an item finishes posting.
+
 ### First run behavior
 
 The very first time the monitor runs (no `STATE_FILE` exists yet), there's nothing to compare against — so by default it treats the current latest release/commit as "new" and posts a notification for it, ping included. This is useful as a quick confirmation the monitor is wired up correctly, but if you're adding this to a repo that already has a long release history, it means you'll be pinged once about something that isn't actually new.
@@ -121,6 +135,8 @@ Bare `#123` references *and* full bare PR/issue URLs are both converted into rea
 
 **Discord returns an error / nothing shows up in the channel.** Double check the `DISCORD_WEBHOOK` secret is set on the *same repo* the workflow file lives in, and that the webhook hasn't been deleted or regenerated on the Discord side (regenerating a webhook changes its URL). The run's log will print the exact HTTP error Discord returned.
 
+**Forum-channel template fails, or Discord's error mentions `thread_name`.** The `DISCORD_WEBHOOK` almost certainly belongs to the wrong channel type — forum-channel templates need a webhook created *on a Forum channel*, and will fail immediately if pointed at a regular text channel's webhook (and a regular-channel template will likewise fail if pointed at a forum channel's webhook). Recreate the webhook on the correct channel type and update the secret.
+
 **`git push` fails at the "Save monitor state" step.** This usually means branch protection rules on the default branch are blocking direct pushes, even from GitHub Actions. Either relax the protection rule for the `github-actions[bot]` actor, or add a small config repo that has no protection just for this workflow's state file.
 
 **You want to re-test a notification you already saw.** Delete or edit `STATE_FILE` in the repo (set it to an older tag/SHA, or delete it entirely) and trigger a manual run — the monitor will treat it as new again.
@@ -135,7 +151,9 @@ Bare `#123` references *and* full bare PR/issue URLs are both converted into rea
 
 **Can I monitor a private repo?** Only if it's the *same* repo the workflow file lives in — the automatic `GITHUB_TOKEN` only has access to its own repo. To monitor a different private repo, you'd need to supply a personal access token with read access to that repo (as an additional secret) and use it in place of `GITHUB_TOKEN` in the script's API calls. Public repos work regardless of where the workflow lives.
 
-**Can I run both templates on the same repo?** Yes — just make sure each one has a unique `name`, `concurrency: group`, and `STATE_FILE`, as described in step 2 and the config table above.
+**Can I run more than one of these templates on the same repo?** Yes, any combination of the four — just make sure each one has a unique `name`, `concurrency: group`, `STATE_FILE`, and (for forum-channel templates) `THREAD_STATE_FILE`, as described in step 2 and the config table above.
+
+**Can I point a forum-channel template at a regular text channel, or vice versa?** No — a Discord webhook is tied to one specific channel and channel type. Use the template that matches your channel (see the table at the top of this README), and see [Forum channel behavior](#forum-channel-behavior) for what's different about the forum versions.
 
 **Can I change the polling frequency?** Yes, edit the `cron:` line under `on: schedule:`. 5 minutes is GitHub Actions' minimum; you can go less frequent (e.g. `*/15 * * * *` or `0 * * * *` for hourly) if you don't need near-real-time notifications.
 
