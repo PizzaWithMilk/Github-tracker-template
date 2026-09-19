@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 10
     env:
       REPO: "OWNER/REPO"                    # <-- CHANGE THIS, e.g. "ChrisTitusTech/winutil"
-      PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, shown in the Discord message title, e.g. "winutil"
+      PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, shown in the Discord message title, e.g. "winutil updated"
       STATE_FILE: "last_release.txt"        # <-- CHANGE THIS if you add more than one monitor to the same repo
       THREAD_STATE_FILE: "last_release_thread.json"  # <-- CHANGE THIS if you add more than one monitor; tracks an in-progress Forum post so a failed run resumes it instead of duplicating. not seeing this file after a successful run is normal and intended.
       PING_MODE: "user"                     # one of: user, role, everyone, none - see README.md
