@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: repo-commit-monitor   # <-- CHANGE THIS if you add more than one monitor to the same repo
+  group: repo-commit-monitor   # <-- CHANGE THIS if you add more than one monitor to the same repo. if you don't, both monitors will confilct and cancel eachother out. e.g. "winutil-repo-commit-monitor"
   cancel-in-progress: true
 
 jobs:
@@ -25,9 +25,9 @@ jobs:
     timeout-minutes: 10
     env:
       REPO: "OWNER/REPO"                    # <-- CHANGE THIS, e.g. "ChrisTitusTech/winutil"
-      PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, shown in the Discord message title, e.g. "winutil"
-      STATE_FILE: "last_commit.txt"         # <-- CHANGE THIS if you add more than one monitor to the same repo
-      THREAD_STATE_FILE: "last_commit_thread.json"  # <-- CHANGE THIS if you add more than one monitor; tracks an in-progress Forum post so a failed run resumes it instead of duplicating. not seeing this file after a successful run is normal and intended.
+      PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, This is the name of the repository you're monitoring and will show up in the discord message, e.g. "winutil" 
+      STATE_FILE: "last_commit.txt"         # <-- CHANGE THIS if you add more than one monitor to the same repo. The default name is fine unless you're adding a second monitor to the same repo — in that case, give each monitor its own filename so they don't overwrite each other's bookmark.
+      THREAD_STATE_FILE: "last_commit_thread.json"  # <-- CHANGE THIS if you add more than one monitor; just give it its own unique filename, same rule as STATE_FILE. THREAD_STATE_FILE tracks an in-progress Forum post so a failed run resumes it instead of duplicating. not seeing this file after a successful run is normal and intended.
       PING_MODE: "user"                     # one of: user, role, everyone, none - see README.md
       PING_ID: "YOUR_DISCORD_USER_ID_HERE"  # only needed when PING_MODE is "user" or "role" Leave default when PING_MODE is set to everyone/none
       NOTIFY_ON_INITIAL_RUN: "true"         # set to "false" to silently record the current latest commit on first run instead of posting/pinging about it
