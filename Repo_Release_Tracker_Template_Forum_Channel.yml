@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      REPO: "OWNER/REPO"                    # <-- CHANGE THIS, e.g. "ChrisTitusTech/winutil"
+      REPO: "OWNER/REPO"                    # <-- CHANGE THIS, Go to the repo you want to monitor and copy the link for it, e.g. "https://github.com/ChrisTitusTech/winutil" then grab the last 2 parts the link, e.g. "ChrisTitusTech/winutil"
       PROJECT_NAME: "Project Name"          # <-- CHANGE THIS, This is the name of the repository you're monitoring and will show up in the discord message, e.g. "winutil" and in the discord message it will show up as "winutil updated"
       STATE_FILE: "last_release.txt"        # <-- CHANGE THIS if you add more than one monitor to the same repo. The default name is fine unless you're adding a second monitor to the same repo — in that case, give each monitor its own filename so they don't overwrite each other's bookmark.
       THREAD_STATE_FILE: "last_release_thread.json"  # <-- CHANGE THIS if you add more than one monitor; just give it its own unique filename, same rule as STATE_FILE. THREAD_STATE_FILE tracks an in-progress Forum post so a failed run resumes it instead of duplicating. not seeing this file after a successful run is normal and intended.
