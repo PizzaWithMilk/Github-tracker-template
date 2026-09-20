@@ -2,7 +2,7 @@
 
 ## What this actually does
 
-These are ready-to-use automation files for GitHub. Once you set one up, it quietly checks a GitHub repo (project) every 5 minutes, and if something new shows up — a new release or a new commit — it automatically posts a message about it in a Discord channel. You don't need to run anything on your own computer; GitHub runs it for you, on a timer, forever (or until you turn it off). It also watches out for a separate GitHub quirk that can silently turn it off on its own — see [Inactivity reminder](#inactivity-reminder) below.
+These are ready-to-use automation files for GitHub. Once you set one up, it quietly checks one or more GitHub repos (projects) every 5 minutes, and if something new shows up — a new release or a new commit — it automatically posts a message about it in a Discord channel. You don't need to run anything on your own computer; GitHub runs it for you, on a timer, forever (or until you turn it off). One workflow file can watch several repos at once — see [Monitoring multiple repositories](#monitoring-multiple-repositories). It also watches out for a separate GitHub quirk that can silently turn it off on its own — see [Inactivity reminder](#inactivity-reminder) below.
 
 There are four template files. You'll use one or two of them, not all four — the table below helps you pick.
 
@@ -14,7 +14,7 @@ If you already know GitHub Actions and Discord webhooks well, skip this part. If
 - **Workflow:** an automation recipe GitHub runs for you. It's a text file ending in `.yml`, and it lives in a special folder called `.github/workflows/` inside a repo. The files in this README *are* workflows.
 - **Webhook:** a special web address (URL) that Discord gives you for one specific channel. Any program that sends a message to that address will have its message posted in that channel — no bot, no login, no password needed on Discord's side. Anyone who has the URL can post to your channel with it, so it's treated like a secret.
 - **Secret (in GitHub):** a private value — like a password or webhook URL — that you store in your repo's settings. Workflows can use it, but it's never shown in logs and no one browsing your repo can see its value once it's saved.
-- **State file:** a small text (or JSON) file this workflow keeps inside your repo, purely to remember "the last thing I already told you about." Think of it like a bookmark. You never need to edit it yourself.
+- **State directory:** a small folder this workflow keeps inside your repo, purely to remember "the last thing I already told you about" — one small bookmark file per repo you're watching, named automatically. You never need to create or edit these files yourself.
 - **Cron schedule:** a standard way of telling a computer "run this automatically, on repeat, at these times" — e.g. "every 5 minutes." You'll see a line like `*/5 * * * *` in the file; you don't need to understand that syntax to use the template as-is.
 - **Commit / push:** "commit" means saving a change permanently in a repo's history; "push" means sending that saved change up to GitHub. When this README says the workflow "commits" or "pushes" something, it's the automation doing this on its own — you don't have to do anything for that part.
 - **Forum channel vs. regular (text) channel:** explained in the next section.
@@ -33,7 +33,7 @@ If you already know GitHub Actions and Discord webhooks well, skip this part. If
 
 Most Discord channels are regular text channels, so if you're not sure, that's the safer guess.
 
-You can use more than one of these at the same time on the same repo — for example, releases going to a forum channel, and commits going to a regular text channel. Each one is set up separately, following the same steps below.
+Each template file can watch **more than one repository at once** — see [Monitoring multiple repositories](#monitoring-multiple-repositories) below. You can also run more than one of these template *files* at the same time — for example, releases going to a forum channel, and commits going to a regular text channel. Each one is set up separately, following the same steps below.
 
 Everything in this README applies to all four template files unless a section specifically says "forum channel templates only." The [Forum channel behavior](#forum-channel-behavior) section covers everything that's different about the forum versions.
 
@@ -41,8 +41,8 @@ Everything in this README applies to all four template files unless a section sp
 
 If you've done this kind of thing before, here's the condensed version — the full walkthrough with screen-by-screen detail is right after this:
 
-1. Change the `name:` field and the `concurrency: group:` value at the top of the file so it doesn't collide with any other monitor workflow in the same repo.
-2. Fill in the `env:` block under the `monitor` job (`REPO`, `PROJECT_NAME`, `STATE_FILE`, `PING_MODE`, `PING_ID`, and `THREAD_STATE_FILE` for forum-channel templates).
+1. Change the `name:` field and the `concurrency: group:` value at the top of the file so it doesn't collide with any other monitor workflow in the same repo — including another copy of the same template, or its forum/non-forum counterpart, since they default to the same group name.
+2. Fill in the `env:` block under the `monitor` job: list the repo(s) you want to watch under `REPOS` (one per line, `OWNER/REPO|Project Name`), and set `STATE_DIR`, `PING_MODE`, `PING_ID`, and `NOTIFY_ON_INITIAL_RUN` as needed.
 3. Add a `DISCORD_WEBHOOK` repository secret (repo **Settings → Secrets and variables → Actions → New repository secret**).
 4. Commit the file to `.github/workflows/` in any repo you control — it doesn't have to be the repo you're monitoring.
 
@@ -66,7 +66,7 @@ The exact filename you save it as inside that folder doesn't matter — `release
 Near the top of the file, you'll see two things to change:
 
 - `name:` — this is just the label you'll see for this workflow in GitHub's **Actions** tab. Change it to something you'll recognize, e.g. `"winutil Release Monitor"`.
-- `concurrency: group:` — this needs to be **unique** compared to any other monitor workflow you set up in the same repo. If you ever add a second monitor to the same repo and forget to give it a different value here, the two monitors will interfere with each other and randomly cancel each other's runs.
+- `concurrency: group:` — this needs to be **unique** compared to any other monitor workflow you set up in the same repo. If you ever add a second monitor to the same repo and forget to give it a different value here, the two monitors will interfere with each other and randomly cancel each other's runs. **This matters even between different template files that otherwise look unrelated** — a release monitor and its forum-channel counterpart both default to the exact same `concurrency: group:` value out of the box, so if you use both in the same repo, change at least one of them.
 
 ### Step 3: Fill in the settings block
 
@@ -74,13 +74,11 @@ Further down in the file, under `jobs: monitor: env:`, you'll find a block of se
 
 | Setting | What it means |
 |---|---|
-| `REPO` | The GitHub repo you want to watch, written as `owner/repo-name`. For example, to watch `github.com/ChrisTitusTech/winutil`, you'd enter `ChrisTitusTech/winutil`. |
-| `PROJECT_NAME` | Just a display name, used in the title of the Discord message — e.g. `"winutil"`. Purely cosmetic; call it whatever you like. |
-| `STATE_FILE` | The name of the small bookmark file (explained above) this workflow keeps to remember the last release/commit it already told you about. The default name is fine unless you're adding a second monitor to the same repo — in that case, give each monitor its own filename so they don't overwrite each other's bookmark. You can put it in a subfolder if you like (e.g. `state/last_release.txt`) — the folder gets created automatically. |
-| `THREAD_STATE_FILE` | *Forum-channel templates only.* A second, separate bookmark file, used only to recover if something goes wrong halfway through posting. Full explanation in [Forum channel behavior](#forum-channel-behavior) below — for now, just give it its own unique filename, same rule as `STATE_FILE`. |
+| `REPOS` | The repo(s) you want to watch, one per line, written as `OWNER/REPO\|Project Name`. `Project Name` is just a display name used in the title of the Discord message — if you leave off the `\|Project Name` part, it defaults to the repo's own name. For example: `ChrisTitusTech/winutil\|winutil`. A line starting with `#` is a comment and is ignored, so the example lines already in the file are safe to leave in place or delete. You can list as many repos as you like on separate lines — see [Monitoring multiple repositories](#monitoring-multiple-repositories) below for what that changes. |
+| `STATE_DIR` | The folder (inside this repo) where the workflow keeps its bookmark files — one small file per repo listed in `REPOS`, named automatically, so you never have to think about individual filenames. The default, `.github/monitor-state`, is fine for almost everyone; change it only if you specifically want these files stored somewhere else. |
 | `PING_MODE` | Controls who gets notified/pinged when something new posts. Explained in detail in the next section. |
 | `PING_ID` | The Discord ID of the specific person or role to ping (only needed for some `PING_MODE` settings). Explained in the next section. |
-| `NOTIFY_ON_INITIAL_RUN` | `"true"` (the default) or `"false"`. Controls what happens the very first time this monitor ever runs — see [First run behavior](#first-run-behavior) below. |
+| `NOTIFY_ON_INITIAL_RUN` | `"true"` (the default) or `"false"`. Controls what happens the first time this monitor checks a given repo — see [First run behavior](#first-run-behavior) below. |
 
 ### Step 4: Create and add the Discord webhook
 
@@ -97,7 +95,7 @@ This is how the workflow is actually able to post into your Discord channel.
 
 That's it for the webhook — you never paste the URL directly into the workflow file itself, only into this secret, which keeps it hidden.
 
-You do **not** need to do anything for `GITHUB_TOKEN` — GitHub creates and provides this automatically for every workflow run. This workflow uses it to talk to GitHub's API a bit more freely, and to save its own bookmark file back into the repo.
+You do **not** need to do anything for `GITHUB_TOKEN` — GitHub creates and provides this automatically for every workflow run. This workflow uses it to talk to GitHub's API a bit more freely, and to save its own bookmark files back into the repo.
 
 ### Step 5: Turn it on and check it worked
 
@@ -108,9 +106,32 @@ To check it's working right away, without waiting:
 1. Go to your repo's **Actions** tab.
 2. Click on the workflow's name in the list on the left.
 3. Click the **Run workflow** button, then confirm.
-4. After a few seconds, click into that run and open up its steps to read the log. You should see printed lines like `No new release.` (meaning it checked and there was nothing new — this is a completely normal, healthy result) or `New releases to report: 1` (meaning it found something and should have posted it to Discord).
+4. After a few seconds (a bit longer if you're watching several repos, or a rate limit briefly kicks in), click into that run and open up its steps to read the log. You should see printed lines like `No new release.` (meaning it checked and there was nothing new — this is a completely normal, healthy result) or `New releases to report for OWNER/REPO: 1` (meaning it found something and should have posted it to Discord). If you listed several repos under `REPOS`, you'll see a block of lines like this for *each* repo, one after another, in the same run.
 
 A run with a green checkmark ✅ means everything worked. A red ✕ means something failed — see [Troubleshooting](#troubleshooting).
+
+## Monitoring multiple repositories
+
+One workflow file can watch more than one repo — just add more lines to `REPOS`:
+
+```
+REPOS: |
+  ChrisTitusTech/winutil|winutil
+  torvalds/linux|Linux Kernel
+  someuser/some-other-repo
+```
+
+(The last line has no `|Project Name`, so it'll just be labeled `some-other-repo` in Discord — the part after the last `/`.)
+
+A few things worth knowing about how this works:
+
+- Every repo listed shares the same `PING_MODE`, `PING_ID`, `STATE_DIR`, and `NOTIFY_ON_INITIAL_RUN` settings for that workflow file — there's no way to give one repo in the list different ping settings than another within the same file. If you need that, set up a separate workflow file just for that repo instead.
+- **Only the very first new item found in a given run gets pinged — across the entire run, not per repo.** If three of your listed repos each happen to have something new in the same 5-minute check, only the first one (in the order it's listed under `REPOS`) gets the ping; the other two still post normally, just without pinging anyone that run. This is intentional, so a busy check doesn't ping you repeatedly — but it does mean a long repo list can occasionally "use up" the ping on whichever repo happened to update first.
+- Each repo's bookmark file (inside `STATE_DIR`) is completely independent, so one repo catching up on a backlog of missed items has no effect on any other repo in the list.
+- If one repo in the list is broken somehow (renamed, deleted, a typo, or a repeated API error), it won't stop the *other* repos from being checked and posted about in that same run — but the overall run will still show as failed (a red ✕) in the Actions tab so you notice. Check the run's log for a line starting with `Error while monitoring` to see exactly which repo it was.
+- One exception: if a single line in `REPOS` is malformed (missing the `/` between owner and repo name, for example), the *entire* run fails immediately, before any repo gets checked at all — see [Troubleshooting](#troubleshooting).
+
+If you'd rather keep repos fully independent — separate ping settings, or you don't want the shared-ping behavior above — set up separate copies of the workflow file instead, one per repo (or per small group of repos), each with its own `REPOS` list, `name`, and `concurrency: group:`.
 
 ## Choosing who gets pinged
 
@@ -129,7 +150,7 @@ Set `PING_MODE` to one of these four values:
 
 **A note on `everyone`:** this pings *everyone* who can see that channel, whether they're active right now or not — it's meant for a channel people already expect update pings in (like a dedicated `#releases` channel), not a general chat channel where it would be disruptive.
 
-Only the *first* message of a batch gets a ping — so if five releases land at once because the monitor catches up on things it missed, you'll be pinged once, not five times. (More on this in [Catching up on multiple items](#catching-up-on-multiple-items) below.)
+Only the *first* message of a batch gets a ping — so if five releases land at once because the monitor catches up on things it missed, you'll be pinged once, not five times. If you're watching multiple repos in the same workflow file (see [Monitoring multiple repositories](#monitoring-multiple-repositories)), this also applies *across* repos in the same run — only the very first new item found, whichever repo it came from, gets pinged. (More on batches in [Catching up on multiple items](#catching-up-on-multiple-items) below.)
 
 You don't need to edit any code for any of this — `PING_MODE` and `PING_ID` are the only two settings involved.
 
@@ -139,20 +160,20 @@ This section explains what actually happens behind the scenes, so you know what 
 
 ### Polling and state
 
-"Polling" just means "checking in periodically to see if anything changed." Both templates poll every 5 minutes (GitHub's fastest allowed schedule for this kind of automation), and can also be run manually any time via **Actions → Run workflow**.
+"Polling" just means "checking in periodically to see if anything changed." Every template polls every 5 minutes (GitHub's fastest allowed schedule for this kind of automation), and can also be run manually any time via **Actions → Run workflow**.
 
-Every single time it runs, here's exactly what happens:
+Every single time it runs, here's exactly what happens, for each repo listed in `REPOS` in turn:
 
 1. It asks GitHub's API: "what are the most recent releases/commits on this repo?"
-2. It compares the newest one against what's saved in `STATE_FILE` (the bookmark file) — i.e., "is this something I've already told you about, or is it new?"
-3. If nothing's changed since last time, it does nothing else and quietly finishes. **This is the normal result for almost every single run** — most of the time, nothing new has happened, and that's expected, not a sign anything is broken.
-4. If something *is* new, it posts about it in Discord, then updates the bookmark file so it doesn't mention that same thing again next time.
+2. It compares the newest one against what's saved in that repo's bookmark file inside `STATE_DIR` — i.e., "is this something I've already told you about, or is it new?"
+3. If nothing's changed since last time, it does nothing else for that repo and moves on. **This is the normal result for almost every single run** — most of the time, nothing new has happened, and that's expected, not a sign anything is broken.
+4. If something *is* new, it posts about it in Discord, then updates that repo's bookmark file so it doesn't mention that same thing again next time.
 
-One more detail: if, for some reason, a run is somehow still going when the next scheduled run starts (this shouldn't normally happen — a run usually finishes in a few seconds), GitHub will cancel the older one rather than letting two copies run at once and potentially conflict with each other.
+One more detail: if, for some reason, a run is somehow still going when the next scheduled run starts (this shouldn't normally happen — a run usually finishes in well under a minute), GitHub will cancel the older one rather than letting two copies run at once and potentially conflict with each other. If that cancellation happens to land in the middle of a run, whichever items it hadn't finished saving state for yet may get reported again on the next run — a rare edge case, but worth knowing about if you're watching an unusually large number of repos.
 
 ### Catching up on multiple items
 
-If this monitor is ever offline for a while (say, GitHub has an outage, or you paused the workflow), it doesn't just tell you about the single newest thing when it comes back — it catches up and tells you about *everything* it missed, oldest first, up to 10 items in one run.
+If this monitor is ever offline for a while (say, GitHub has an outage, or you paused the workflow), it doesn't just tell you about the single newest thing when it comes back — it catches up and tells you about *everything* it missed for that repo, oldest first, up to 10 items in one run. This applies independently to each repo in `REPOS` — one repo catching up on a large backlog doesn't affect the 10-item cap for any other repo.
 
 If more than 10 things happened while it was away, the oldest ones beyond that limit are skipped (with a note saying how many were skipped) rather than flooding your channel with a wall of messages — you'll still always be told about the current latest one.
 
@@ -166,27 +187,29 @@ Only the very first item in a batch like this gets a ping and a note attached; t
 
 *(This section only applies to the two forum-channel templates.)* Everything described above still applies — the one difference is **where things get posted**: instead of dropping a message into a shared, ongoing channel, **each new release or commit gets posted as its own new forum post (a "thread")**.
 
-- Each thread's title looks like `{PROJECT_NAME} Updated! — {tag}` for releases, or `{PROJECT_NAME} Updated! — Commit {short commit ID}` for commits. (Forum post titles have a 100-character limit in Discord, so an unusually long one gets shortened automatically.)
+- Each thread's title looks like `{Project Name} Updated! — {tag}` for releases, or `{Project Name} Updated! — Commit {short commit ID}` for commits. (Forum post titles have a 100-character limit in Discord, so an unusually long one gets shortened automatically.)
 - If one release or commit's notes are too long to fit in a single message, the extra "(continued)" messages are posted as replies *inside that same thread* — they don't create new, separate posts.
 - If several new releases or commits show up in one run, **each one gets its own separate thread** — three new releases means three new forum posts, not one post containing three messages. As above, only the first (oldest) one in that batch gets a ping.
 
-**About `THREAD_STATE_FILE` and why you usually won't see it in your repo — this is expected, not a problem:**
+**About the thread-resume files, and why you usually won't see them in your repo — this is expected, not a problem:**
 
-This file is a temporary safety net, not a permanent record. Here's exactly when it exists and when it doesn't:
+Alongside each repo's regular bookmark file, `STATE_DIR` also holds a small, temporary resume file for each repo you list in `REPOS` (named automatically) — a safety net, not a permanent record, used only to recover if something goes wrong halfway through posting a long item.
 
-- While a single release or commit is in the middle of being posted (say, its notes need 3 separate messages), this file briefly holds a note saying "I'm partway through posting this one, here's exactly where I left off."
+- While a single release or commit is in the middle of being posted (say, its notes need 3 separate messages), this file briefly holds a note saying "I'm partway through posting this one — here's exactly which thread, and where I left off."
 - The moment that item finishes posting completely — even if it only ever needed one message — this file is automatically deleted again, before the run ends.
 - It is only left behind, and only shows up as a real file in your repo, if a run genuinely fails or errors out *in the middle* of posting a long item (for example, Discord has a temporary outage right as it's sending message 2 of 3). In that case, the next run reads this file and continues posting into the *same* thread exactly where it left off — instead of starting a confusing duplicate thread for the same release.
 
-**In short: if you look in your repo and don't see this file, that's the normal, healthy state — it means every release/commit so far has posted completely successfully.** You'd only expect to actually see this file sitting there if a previous run failed partway through, and even then, it should disappear again as soon as a later run finishes posting that item successfully.
+**In short: if `STATE_DIR` only contains the regular bookmark files, that's the normal, healthy state — it means every release/commit so far has posted completely successfully.** You'd only expect to see one of these resume files sitting there if a previous run failed partway through, and even then, it should disappear again as soon as a later run finishes posting that item successfully.
+
+The [Inactivity reminder](#inactivity-reminder) below posts as its own brand-new Forum thread when it fires — it never needs a resume file, since it always fits in a single message.
 
 ### First run behavior
 
-The very first time this monitor ever runs, there's no bookmark yet (`STATE_FILE` doesn't exist), so it has nothing to compare against. By default, it treats whatever the *current* latest release/commit is as "new" and posts a notification about it, ping included.
+The first time this monitor checks a *given* repo — whether that's because the whole workflow is brand new, or because you just added a new line to `REPOS` for a repo it hasn't seen before — there's no bookmark for that repo yet, so it has nothing to compare against. By default, it treats whatever that repo's *current* latest release/commit is as "new" and posts a notification about it, ping included (subject to the once-per-run ping rule described above).
 
-This is handy as a quick way to confirm everything is wired up correctly. But if you're adding this to a repo that already has a long history of releases, it does mean you'll get pinged once about something that isn't actually new — it already existed before you set this up.
+This is handy as a quick way to confirm everything is wired up correctly. But if you're adding an established repo with a long release/commit history, it does mean you'll get a notification about something that isn't actually new — it already existed before you added it.
 
-If you'd rather skip that, set `NOTIFY_ON_INITIAL_RUN` to `"false"`. With that set, the very first run will silently save the current latest release/commit as its starting bookmark, without posting anything — and you'll only start getting notified about things that happen *after* that point.
+If you'd rather skip that, set `NOTIFY_ON_INITIAL_RUN` to `"false"`. With that set, the first time any given repo is checked, it will silently save that repo's current latest release/commit as its starting bookmark, without posting anything — you'll only start getting notified about things that happen *after* that point, for that repo. Since this is decided per repo, it also covers any repo you add to `REPOS` later, not just the very first run of the whole workflow.
 
 ### Message length and splitting
 
@@ -194,37 +217,41 @@ Discord messages have a length limit. The ping, title, and author/link details a
 
 ### Reliability
 
-In plain terms: this workflow is built to quietly recover from small, temporary network problems on its own, rather than immediately giving up and failing.
+In plain terms: this workflow is built to quietly recover from small, temporary problems on its own, rather than immediately giving up and failing.
 
 - If a network request times out or briefly fails to connect, it automatically tries again a few times, waiting a little longer between each attempt, before giving up.
-- Both GitHub and Discord can sometimes respond with "you're sending requests too fast, slow down" (this is called a rate limit, HTTP error code 429) — this can happen if a single run needs to send several messages in a row. When that happens, the workflow automatically waits the amount of time it's told to, then tries again, up to 5 times, instead of just failing.
-- To help avoid triggering that "too fast" response in the first place, it also deliberately waits a fraction of a second between each Discord message it sends.
-- Any *other* kind of error (like an invalid webhook URL, or a repo that doesn't exist) is treated as a real problem, not a temporary glitch — it's **not** retried, and the run fails immediately so you'll see it clearly in the Actions tab rather than it silently retrying forever.
+- Both GitHub and Discord can sometimes respond with "you're sending requests too fast, slow down" (this is called a rate limit, HTTP error code 429) — this can happen if a single run needs to send several messages in a row, especially when watching several repos at once. When that happens, the workflow automatically waits the amount of time it's told to (capped at 15 seconds per wait, so it never stalls indefinitely), then tries again, up to 5 times, instead of just failing.
+- To help avoid triggering that "too fast" response in the first place, it also deliberately waits at least half a second between every single Discord message it sends — including between messages for entirely different repos in the same run.
+- Any *other* kind of error (like an invalid webhook URL, or a repo that doesn't exist) is treated as a real problem, not a temporary glitch — it's **not** retried, and the run fails immediately so you'll see it clearly in the Actions tab rather than it silently retrying forever. When watching multiple repos, one repo hitting this kind of error doesn't stop the others from being checked (see [Monitoring multiple repositories](#monitoring-multiple-repositories)) — but it does mean that run's overall result still shows as failed, so you notice.
 
-### Links in release notes / commit messages
+## Links in release notes / commit messages
 
 Some projects write plain issue/PR references like `#123` in their release notes; others (especially auto-generated changelogs) write the full web address instead, like `https://github.com/owner/repo/pull/123`. GitHub turns both of these into clickable links automatically on its own website — but Discord does neither on its own. So this workflow converts both styles into proper clickable Discord links before posting, so they work no matter which style the original text used. If something is already written as a clickable link, it's left alone rather than being turned into a broken double-link.
 
-### Inactivity reminder
+## Inactivity reminder
 
 This is unrelated to releases or commits — it's a safety net for a separate GitHub rule: **if a repo goes 60 days with absolutely no commits pushed to it, GitHub automatically disables any scheduled workflows in that repo**, this one included. That can happen silently, with no warning from GitHub — you'd typically only notice once you realize notifications have quietly stopped.
 
-This matters most if you followed the suggestion in Step 1 to put this workflow in its own small, dedicated repo rather than one that already gets commits for other reasons. A repo used for nothing but hosting this workflow only ever gets a new commit when the workflow itself finds something new to report — so if the project you're monitoring goes quiet for a couple of months, that hosting repo could genuinely rack up 60 days of silence and get shut off without you ever being told.
+This matters most if you followed the suggestion in Step 1 to put this workflow in its own small, dedicated repo rather than one that already gets commits for other reasons. A repo used for nothing but hosting this workflow only ever gets a new commit when the workflow itself finds something new to report — so if every project you're monitoring goes quiet for a couple of months, that hosting repo could genuinely rack up 60 days of silence and get shut off without you ever being told.
 
-To guard against that, every single run also quietly checks one extra thing: "has it been at least 59 days since the last commit to this repo?" If so — and only if you haven't already been sent this particular reminder — it posts a one-time Discord message titled **"GitHub Workflow Re-enable Reminder"**, pinging whoever you've already configured via `PING_MODE`/`PING_ID`.
+To guard against that, every single run also quietly checks one extra thing: "has it been at least 59 days since the last commit to this repo?" If so — and only if you haven't already been sent this particular reminder — it posts a one-time Discord message titled **"Workflow Re-enable Reminder"**, pinging whoever you've already configured via `PING_MODE`/`PING_ID`. On a forum-channel template, this reminder is posted as its own brand-new Forum thread (separate from any thread used for an actual release or commit), since a forum channel has no shared "main" stream to drop a plain message into.
 
 **Important: this message can't actually stop GitHub from disabling the workflow** — that decision is entirely GitHub's, made outside this workflow, and nothing a workflow run does from the inside can prevent it. What this message *does* do is warn you a day ahead of time, so once the workflow does get disabled, it isn't a surprise — you'll already know to go to your repo's **Actions** tab, click the workflow, and click **Re-enable workflow**, which starts everything running again immediately and takes about ten seconds.
 
 A few more details worth knowing:
 
 - You won't be spammed with this every 5 minutes once the 59-day mark passes — it's remembered (using GitHub's own Actions cache), so you'll only be told about a given quiet stretch once, not on every single run afterward.
-- Any new commit to the repo — including this workflow's own bookmark-file update, the moment the thing you're monitoring becomes active again — resets the clock automatically. You won't hear about it again unless another full 59 days of total silence pass.
+- Any new commit to the repo — including this workflow's own bookmark-file update, the moment anything you're monitoring becomes active again — resets the clock automatically. You won't hear about it again unless another full 59 days of total silence pass.
 - If the repo stays inactive even after you re-enable it, expect to be reminded again roughly every 59 days for as long as that remains true.
 - This is fully automatic — there's nothing extra to set up or configure. It reuses the same `PING_MODE` and `PING_ID` settings you already filled in for regular notifications.
 
 ## Troubleshooting
 
-**Nothing posted, and there's no error in the Actions tab.** This is very likely completely normal — most runs find nothing new, since most 5-minute windows don't have a new release or commit in them. Open the run's log and look for a line like `No new release.` or `No new commit.` — if you see that, everything is working correctly. If you expected something to have posted and didn't, double-check that `REPO` is spelled exactly right (`owner/repo-name`, and capitalization matters), and that the release/commit genuinely exists on the repo's default (main) branch — the commit monitor only ever watches the default branch.
+**The whole run fails immediately, before checking anything, and the log mentions `Invalid REPOS entry`.** One of your `REPOS` lines isn't formatted as `OWNER/REPO` (or `OWNER/REPO|Project Name`) — check for a missing `/`, extra spaces, or a stray leading/trailing `|`. Unlike a single unreachable repo, a formatting mistake here blocks the *entire* run, since the workflow can't tell what to check yet. Fix the line and it'll pick back up on the next scheduled run (or click **Run workflow** to retry immediately).
+
+**One repo in my `REPOS` list keeps failing, but the others post fine.** That's expected — see [Monitoring multiple repositories](#monitoring-multiple-repositories). The run still shows as failed overall so you notice, but the log will tell you exactly which repo via a line like `Error while monitoring OWNER/REPO: ...`, and every other repo in your list is still checked and posted about normally.
+
+**Nothing posted, and there's no error in the Actions tab.** This is very likely completely normal — most runs find nothing new, since most 5-minute windows don't have a new release or commit in them. Open the run's log and look for a line like `No new release.` or `No new commit.` for the repo you're expecting — if you see that, everything is working correctly. If you expected something to have posted and didn't, double-check that repo's entry in `REPOS` is spelled exactly right (`owner/repo-name`, and capitalization matters), and that the release/commit genuinely exists on the repo's default (main) branch — the commit monitor only ever watches the default branch.
 
 **The workflow doesn't seem to run on its own schedule at all.** GitHub automatically disables scheduled workflows in a repo that's had no commit activity for 60 days. If that's happened, go re-enable it manually from the Actions tab — these templates try to warn you about this a day in advance over Discord (see [Inactivity reminder](#inactivity-reminder) above), so you shouldn't be caught completely off guard, but the fix either way is the same: **Actions tab → the workflow → Re-enable workflow**. Scheduled runs can also sometimes be delayed by several minutes when GitHub itself is under heavy load — that's a limitation on GitHub's end, not something this workflow controls.
 
@@ -232,21 +259,25 @@ A few more details worth knowing:
 
 **A forum-channel template fails, especially with an error mentioning `thread_name`.** This almost always means the `DISCORD_WEBHOOK` secret is pointing at the wrong kind of channel. Forum-channel templates need a webhook that was created *on a Forum channel specifically* — using a regular text channel's webhook with a forum-channel template (or vice versa) will fail immediately on the very first post. Go back to Discord, create a new webhook on the correct channel type, and update the secret with the new URL.
 
-**The workflow fails specifically at the "Save monitor state" step, and `git push` is the part that errors.** This usually means the repo has branch protection rules that block direct pushes to the main branch, even from GitHub's own automation. Either loosen that rule specifically for the `github-actions[bot]` account, or use a separate, unprotected repo just for this workflow's bookmark file.
+**The workflow fails specifically at the "Save monitor state" step, and `git push` is the part that errors.** This usually means the repo has branch protection rules that block direct pushes to the main branch, even from GitHub's own automation. Either loosen that rule specifically for the `github-actions[bot]` account, or use a separate, unprotected repo just for this workflow's bookmark files.
 
-**You want to see a notification you've already gotten again, to test something.** Open `STATE_FILE` in your repo, and either delete its contents, or change it to an older release tag / commit ID than the current one. The next run will then treat the current latest one as "new" again and post about it.
+**You want to see a notification you've already gotten again, to test something.** Open `STATE_DIR` in your repo and find the bookmark file for that specific repo — it's named automatically after the repo, e.g. `ChrisTitusTech__winutil_release.txt`. Either delete its contents, or change it to an older release tag / commit ID than the current one. The next run will then treat the current latest one as "new" again for that repo and post about it.
 
 ## Security & permissions notes
 
 - This workflow only asks GitHub for permission to read its own repo and write (commit) back to it — nothing more. It cannot touch issues, pull requests, other repos, or your account settings.
-- That permission only applies to the repo the *workflow file itself* lives in — not necessarily the repo you're monitoring. This matters if you're trying to monitor a *different*, *private* repo than the one hosting the workflow — see the FAQ below for what to do in that case.
-- Settings like `PING_ID`, `REPO`, and `PROJECT_NAME` are stored as plain, visible text in the workflow file — anyone who can view your repo can see them. Only `DISCORD_WEBHOOK` needs to be kept private, which is exactly why it's the one thing stored as a secret instead of typed directly into the file.
+- That permission only applies to the repo the *workflow file itself* lives in — not necessarily the repo(s) you list in `REPOS`. This matters if you're trying to monitor a *different*, *private* repo than the one hosting the workflow — see the FAQ below for what to do in that case.
+- Settings like `PING_ID` and the repo/project names inside `REPOS` are stored as plain, visible text in the workflow file — anyone who can view your repo can see them. Only `DISCORD_WEBHOOK` needs to be kept private, which is exactly why it's the one thing stored as a secret instead of typed directly into the file.
 
 ## FAQ
 
-**Can I use this to monitor a private repo?** Only if it's the *same* repo you put the workflow file into — the automatic permission GitHub gives the workflow only covers its own repo. To watch a *different* private repo, you'd need to create a personal access token with read access to that repo, add it as an additional secret, and use it in place of the automatic one in the script. Public repos can always be monitored, regardless of which repo hosts the workflow.
+**Can I use this to monitor a private repo?** Only if it's the *same* repo you put the workflow file into — the automatic permission GitHub gives the workflow only covers its own repo. To watch a *different* private repo, you'd need to create a personal access token with read access to that repo, add it as an additional secret, and use it in place of the automatic one in the script (this applies to all repos the script requests with it, so it's the simplest option when the repos you're adding are yours). Public repos can always be monitored, regardless of which repo hosts the workflow, and can be freely mixed with the hosting repo itself in the same `REPOS` list.
 
-**Can I set up more than one of these on the same repo?** Yes — any combination of the four templates. Just make sure each one has its own unique `name`, `concurrency: group`, `STATE_FILE`, and (for forum-channel templates) `THREAD_STATE_FILE`, as covered in the setup steps above. If two monitors accidentally share any of those, they'll interfere with each other.
+**Can I watch more than one repo, or set up more than one of these on the same repo?** Two different things, both possible:
+- **To watch several repos with one workflow file:** just add more lines to `REPOS` — see [Monitoring multiple repositories](#monitoring-multiple-repositories). They'll share the same `PING_MODE`, `PING_ID`, and the once-per-run ping rule.
+- **To run more than one separate monitor** (e.g. because you want different ping settings for different repos, or you want to combine any of the four template types) — that's also fine. Just make sure each workflow *file* has its own unique `name` and `concurrency: group`, and that their `STATE_DIR` values don't collide if they'd otherwise process the exact same repo (different repos in different files are safe either way, since state filenames are generated from the repo name). If two monitors accidentally share a `concurrency: group`, they'll interfere with each other.
+
+**Do I need a separate `STATE_DIR` for each repo I add to `REPOS`?** No — one shared `STATE_DIR` works for any number of repos in the same workflow file. A uniquely-named bookmark file is created automatically for each repo, so they never collide.
 
 **Can I use a forum-channel template with a regular text channel, or the other way around?** No. A Discord webhook is tied to one specific channel of one specific type, and the two kinds of templates talk to Discord differently. Use whichever template matches the channel you actually have — see the table near the top of this README.
 
@@ -256,6 +287,6 @@ A few more details worth knowing:
 
 **Will this notify me about draft releases or prereleases?** No, not by default — it only notifies about a repo's actual "latest release," the same definition GitHub itself uses, which excludes drafts and prereleases. If you specifically want prereleases included too, that requires a small edit inside the script itself (removing one filter condition) — it's not something you can turn on just by changing a setting.
 
-**Will I hit GitHub's rate limits by running this?** No, in virtually all normal cases. GitHub limits how many API requests you can make without logging in to 60 per hour, but this workflow automatically authenticates every request using the token GitHub provides for free, which raises that limit dramatically — high enough that you'd need to be running an unusually large number of these monitors from a single repo before it would ever become a concern.
+**Will I hit GitHub's rate limits by running this?** No, in virtually all normal cases. GitHub limits how many API requests you can make without logging in to 60 per hour, but this workflow automatically authenticates every request using the token GitHub provides for free, which raises that limit dramatically. Watching several repos in `REPOS` means one extra API call per repo per run, which barely moves the needle — you'd need to be watching an unusually large number of repos from a single repo before this would ever become a concern.
 
-**Why did I get a Discord message titled "GitHub Workflow Re-enable Reminder"?** That's expected — not an error, and nothing is broken. It means the repo hosting this workflow hasn't had a commit in about 59 days, which is right before GitHub's own 60-day cutoff for automatically disabling scheduled workflows. See [Inactivity reminder](#inactivity-reminder) above for the full explanation; the short version is: check the **Actions** tab in a day or so, and if the workflow has been disabled, click **Re-enable workflow**.
+**Why did I get a Discord message titled "Workflow Re-enable Reminder"?** That's expected — not an error, and nothing is broken. It means the repo hosting this workflow hasn't had a commit in about 59 days, which is right before GitHub's own 60-day cutoff for automatically disabling scheduled workflows. See [Inactivity reminder](#inactivity-reminder) above for the full explanation; the short version is: check the **Actions** tab in a day or so, and if the workflow has been disabled, click **Re-enable workflow**.
