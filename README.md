@@ -74,7 +74,7 @@ Further down in the file, under `jobs: monitor: env:`, you'll find a block of se
 
 | Setting | What it means |
 |---|---|
-| `REPOS` | The repo(s) you want to watch, one per line, written as `OWNER/REPO\|Project Name`. `Project Name` is just a display name used in the title of the Discord message — if you leave off the `\|Project Name` part, it defaults to the repo's own name. For example: `ChrisTitusTech/winutil\|winutil`. A line starting with `#` is a comment and is ignored, so the example lines already in the file are safe to leave in place or delete. You can list as many repos as you like on separate lines — see [Monitoring multiple repositories](#monitoring-multiple-repositories) below for what that changes. |
+| `REPOS` | The repo(s) you want to watch, one per line, written as `OWNER/REPO\|Project Name`. `Project Name` is just a display name used in the title of the Discord message — if you leave off the `\|Project Name` part, it defaults to the repo's own name. For example: `ChrisTitusTech/winutil\|winutil`. A line starting with `#` is a comment and is ignored, so the example lines already in the file are safe to leave in place or delete. You can list as many repos as you like on separate lines, and each one can optionally override the ping settings just for that repo (and, on forum-channel templates, apply Forum tags to its posts) — see [Monitoring multiple repositories](#monitoring-multiple-repositories) below for the full format. |
 | `STATE_DIR` | The folder (inside this repo) where the workflow keeps its bookmark files — one small file per repo listed in `REPOS`, named automatically, so you never have to think about individual filenames. The default, `.github/monitor-state`, is fine for almost everyone; change it only if you specifically want these files stored somewhere else. |
 | `PING_MODE` | Controls who gets notified/pinged when something new posts. Explained in detail in the next section. |
 | `PING_ID` | The Discord ID of the specific person or role to ping (only needed for some `PING_MODE` settings). Explained in the next section. |
@@ -123,15 +123,27 @@ REPOS: |
 
 (The last line has no `|Project Name`, so it'll just be labeled `some-other-repo` in Discord — the part after the last `/`.)
 
-A few things worth knowing about how this works:
+**Each repo can also override the ping settings just for that one repo**, by adding `|PING_MODE|PING_ID` after the project name:
 
-- Every repo listed shares the same `PING_MODE`, `PING_ID`, `STATE_DIR`, and `NOTIFY_ON_INITIAL_RUN` settings for that workflow file — there's no way to give one repo in the list different ping settings than another within the same file. If you need that, set up a separate workflow file just for that repo instead.
-- **Only the very first new item found in a given run gets pinged — across the entire run, not per repo.** If three of your listed repos each happen to have something new in the same 5-minute check, only the first one (in the order it's listed under `REPOS`) gets the ping; the other two still post normally, just without pinging anyone that run. This is intentional, so a busy check doesn't ping you repeatedly — but it does mean a long repo list can occasionally "use up" the ping on whichever repo happened to update first.
+```
+REPOS: |
+  ChrisTitusTech/winutil|winutil|role|123456789012345678
+  torvalds/linux|Linux Kernel|everyone
+  someuser/some-other-repo
+```
+
+Any repo that leaves these off just uses the workflow's global `PING_MODE`/`PING_ID` instead — so you only need to add this for repos that should behave differently. `everyone` and `none` don't need a `PING_ID` at all, so you can leave it off entirely (as with the `torvalds/linux` line above). See [Choosing who gets pinged](#choosing-who-gets-pinged) below for what each mode does.
+
+*(Forum-channel templates only: there's an additional optional field, right before the ping settings, for applying Forum tags to that repo's posts — `OWNER/REPO|Project Name|TAG_ID,TAG_ID|PING_MODE|PING_ID`. See [Forum channel behavior](#forum-channel-behavior) below.)*
+
+A few more things worth knowing about how this works:
+
+- **Pinging happens per repo, not once for the whole run.** If three of your listed repos each happen to have something new in the same 5-minute check, each one pings independently — using its own ping settings, whether that's the global default or a per-repo override — so you'd get three pings, not one shared ping for the whole run. Within a single repo's own batch of catch-up items, only the first one still gets pinged; see [Catching up on multiple items](#catching-up-on-multiple-items).
 - Each repo's bookmark file (inside `STATE_DIR`) is completely independent, so one repo catching up on a backlog of missed items has no effect on any other repo in the list.
 - If one repo in the list is broken somehow (renamed, deleted, a typo, or a repeated API error), it won't stop the *other* repos from being checked and posted about in that same run — but the overall run will still show as failed (a red ✕) in the Actions tab so you notice. Check the run's log for a line starting with `Error while monitoring` to see exactly which repo it was.
-- One exception: if a single line in `REPOS` is malformed (missing the `/` between owner and repo name, for example), the *entire* run fails immediately, before any repo gets checked at all — see [Troubleshooting](#troubleshooting).
+- One exception: if a single line in `REPOS` is malformed (missing the `/` between owner and repo name, an invalid `PING_MODE`, or a `user`/`role` override with no ID given, for example), the *entire* run fails immediately, before any repo gets checked at all — see [Troubleshooting](#troubleshooting).
 
-If you'd rather keep repos fully independent — separate ping settings, or you don't want the shared-ping behavior above — set up separate copies of the workflow file instead, one per repo (or per small group of repos), each with its own `REPOS` list, `name`, and `concurrency: group:`.
+If you'd rather keep a repo fully separate — its own `STATE_DIR`, or just to keep things simpler to reason about — set up a separate copy of the workflow file instead, with its own `REPOS` list, `name`, and `concurrency: group:`.
 
 ## Choosing who gets pinged
 
@@ -150,9 +162,11 @@ Set `PING_MODE` to one of these four values:
 
 **A note on `everyone`:** this pings *everyone* who can see that channel, whether they're active right now or not — it's meant for a channel people already expect update pings in (like a dedicated `#releases` channel), not a general chat channel where it would be disruptive.
 
-Only the *first* message of a batch gets a ping — so if five releases land at once because the monitor catches up on things it missed, you'll be pinged once, not five times. If you're watching multiple repos in the same workflow file (see [Monitoring multiple repositories](#monitoring-multiple-repositories)), this also applies *across* repos in the same run — only the very first new item found, whichever repo it came from, gets pinged. (More on batches in [Catching up on multiple items](#catching-up-on-multiple-items) below.)
+`PING_MODE`/`PING_ID` set the workflow's *global default* — every repo in `REPOS` uses these unless that repo's own line overrides them. See [Monitoring multiple repositories](#monitoring-multiple-repositories) above for that per-repo override format.
 
-You don't need to edit any code for any of this — `PING_MODE` and `PING_ID` are the only two settings involved.
+Only the *first* message of a batch gets a ping — so if five releases land at once for one repo because the monitor catches up on things it missed, you'll be pinged once for that repo, not five times. If you're watching multiple repos in the same workflow file, each one pings independently on its own terms — see [Monitoring multiple repositories](#monitoring-multiple-repositories) for the full picture. (More on batches in [Catching up on multiple items](#catching-up-on-multiple-items) below.)
+
+You don't need to edit any code for any of this — `PING_MODE` and `PING_ID` (globally, or per repo in `REPOS`) are the only settings involved.
 
 ## How it behaves
 
@@ -191,6 +205,10 @@ Only the very first item in a batch like this gets a ping and a note attached; t
 - If one release or commit's notes are too long to fit in a single message, the extra "(continued)" messages are posted as replies *inside that same thread* — they don't create new, separate posts.
 - If several new releases or commits show up in one run, **each one gets its own separate thread** — three new releases means three new forum posts, not one post containing three messages. As above, only the first (oldest) one in that batch gets a ping.
 
+**Forum tags (optional).** You can have a repo's posts automatically tagged with one or more of your Forum channel's tags, using the 3rd field in that repo's `REPOS` line — a comma-separated list of numeric tag IDs: `OWNER/REPO|Project Name|TAG_ID,TAG_ID|PING_MODE|PING_ID`. Discord allows at most 5 tags per post. If you want to set a ping override for that repo but no tags, leave the field empty rather than skipping it: `OWNER/REPO|Project Name||PING_MODE|PING_ID`.
+
+This is genuinely the fiddly part: unlike user/role IDs, Discord doesn't give you a simple right-click **Copy ID** for Forum tags. The most reliable way to find one is to open your server in Discord's web app (in a browser, not the desktop app) → the Forum channel's settings → **Tags**, then open your browser's Developer Tools (F12) → **Network** tab, and look through the channel data Discord loads there — it lists each tag's name right next to its numeric ID. This whole feature is entirely optional; leave the field empty (or omit it) and nothing gets tagged.
+
 **About the thread-resume files, and why you usually won't see them in your repo — this is expected, not a problem:**
 
 Alongside each repo's regular bookmark file, `STATE_DIR` also holds a small, temporary resume file for each repo you list in `REPOS` (named automatically) — a safety net, not a permanent record, used only to recover if something goes wrong halfway through posting a long item.
@@ -223,6 +241,7 @@ In plain terms: this workflow is built to quietly recover from small, temporary 
 - Both GitHub and Discord can sometimes respond with "you're sending requests too fast, slow down" (this is called a rate limit, HTTP error code 429) — this can happen if a single run needs to send several messages in a row, especially when watching several repos at once. When that happens, the workflow automatically waits the amount of time it's told to (capped at 15 seconds per wait, so it never stalls indefinitely), then tries again, up to 5 times, instead of just failing.
 - To help avoid triggering that "too fast" response in the first place, it also deliberately waits at least half a second between every single Discord message it sends — including between messages for entirely different repos in the same run.
 - Any *other* kind of error (like an invalid webhook URL, or a repo that doesn't exist) is treated as a real problem, not a temporary glitch — it's **not** retried, and the run fails immediately so you'll see it clearly in the Actions tab rather than it silently retrying forever. When watching multiple repos, one repo hitting this kind of error doesn't stop the others from being checked (see [Monitoring multiple repositories](#monitoring-multiple-repositories)) — but it does mean that run's overall result still shows as failed, so you notice.
+- If you run more than one of these monitor workflows in the same repo (see the FAQ), it's normal for two of them to occasionally try to save their state at almost the same moment. Saving state automatically retries a few times if that happens, so a timing collision like that doesn't fail the run or lose either workflow's progress.
 
 ## Links in release notes / commit messages
 
@@ -274,8 +293,8 @@ A few more details worth knowing:
 **Can I use this to monitor a private repo?** Only if it's the *same* repo you put the workflow file into — the automatic permission GitHub gives the workflow only covers its own repo. To watch a *different* private repo, you'd need to create a personal access token with read access to that repo, add it as an additional secret, and use it in place of the automatic one in the script (this applies to all repos the script requests with it, so it's the simplest option when the repos you're adding are yours). Public repos can always be monitored, regardless of which repo hosts the workflow, and can be freely mixed with the hosting repo itself in the same `REPOS` list.
 
 **Can I watch more than one repo, or set up more than one of these on the same repo?** Two different things, both possible:
-- **To watch several repos with one workflow file:** just add more lines to `REPOS` — see [Monitoring multiple repositories](#monitoring-multiple-repositories). They'll share the same `PING_MODE`, `PING_ID`, and the once-per-run ping rule.
-- **To run more than one separate monitor** (e.g. because you want different ping settings for different repos, or you want to combine any of the four template types) — that's also fine. Just make sure each workflow *file* has its own unique `name` and `concurrency: group`, and that their `STATE_DIR` values don't collide if they'd otherwise process the exact same repo (different repos in different files are safe either way, since state filenames are generated from the repo name). If two monitors accidentally share a `concurrency: group`, they'll interfere with each other.
+- **To watch several repos with one workflow file:** just add more lines to `REPOS` — see [Monitoring multiple repositories](#monitoring-multiple-repositories). Each repo can optionally have its own ping settings (and, on forum-channel templates, its own Forum tags); any repo that doesn't specify these just uses the workflow's global `PING_MODE`/`PING_ID`.
+- **To run more than one separate monitor** (e.g. because you want entirely independent state, or you want to combine any of the four template types) — that's also fine. Just make sure each workflow *file* has its own unique `name` and `concurrency: group`, and that their `STATE_DIR` values don't collide if they'd otherwise process the exact same repo (different repos in different files are safe either way, since state filenames are generated from the repo name). If two monitors accidentally share a `concurrency: group`, they'll interfere with each other.
 
 **Do I need a separate `STATE_DIR` for each repo I add to `REPOS`?** No — one shared `STATE_DIR` works for any number of repos in the same workflow file. A uniquely-named bookmark file is created automatically for each repo, so they never collide.
 
