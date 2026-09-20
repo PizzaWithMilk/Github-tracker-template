@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      REPOS: |                                  # Add one repository per line using: "OWNER/REPO|Project Name|TAG_IDS|PING_MODE|PING_ID". TAG_IDS and per-repo ping settings are optional. Multiple tags can be comma-separated. To set a ping without a Forum tag, leave TAG_IDS empty: OWNER/REPO|Project Name||user|123456789012345678
+      REPOS: |                                  # Add one repository per line using: "OWNER/REPO|Project Name|TAG_IDS|PING_MODE|PING_ID". TAG_IDS and per-repo ping settings are optional. Multiple tags can be comma-separated with a max of 5. To set a ping without a Forum tag, leave TAG_IDS empty: OWNER/REPO|Project Name||user|123456789012345678
         OWNER/REPO|Project Name
         # e.g. OWNER/REPO|Project Name|TAG_ID|role|123456789012345678
       STATE_DIR: ".github/monitor-state"        # <-- CHANGE THIS if you want the monitor state stored somewhere else.
