@@ -36,11 +36,46 @@ jobs:
       - name: Checkout monitor state
         uses: actions/checkout@v4
 
+      - name: Calculate 59-day inactivity reminder state
+        id: inactivity
+        shell: bash
+        run: |
+          # GitHub's 60-day scheduled-workflow inactivity rule is based on
+          # activity in the repository that contains this workflow.
+          interval=$((59 * 24 * 60 * 60))
+          last_commit_epoch="$(git log -1 --format=%ct)"
+          last_commit_sha="$(git rev-parse HEAD)"
+          now_epoch="$(date -u +%s)"
+          elapsed=$((now_epoch - last_commit_epoch))
+          cycle=$((elapsed / interval))
+
+          if [ "$elapsed" -ge "$interval" ]; then
+            eligible="true"
+          else
+            eligible="false"
+          fi
+
+          workflow_key="$(printf '%s' "${GITHUB_WORKFLOW_REF:-$GITHUB_WORKFLOW}" | sha256sum | cut -c1-16)"
+
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+          echo "cache_key=github-workflow-inactivity-${workflow_key}-${last_commit_sha}-${cycle}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore 59-day inactivity reminder state
+        id: inactivity-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .github/.workflow-inactivity-reminder.marker
+          key: ${{ steps.inactivity.outputs.cache_key }}
+
       - name: Check for new commits
+        id: monitor
         env:
           # DISCORD_WEBHOOK must belong to the Discord Forum Channel that should receive the posts.
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REMINDER_ELIGIBLE: ${{ steps.inactivity.outputs.eligible }}
+          REMINDER_CACHE_HIT: ${{ steps.inactivity-cache.outputs.cache-hit }}
+          REMINDER_CACHE_MARKER: .github/.workflow-inactivity-reminder.marker
         run: |
           python3 <<'PY'
           import json
@@ -138,6 +173,59 @@ jobs:
                   return "@everyone", {"parse": ["everyone"]}
               return "", {}
 
+
+          def maybe_send_inactivity_reminder():
+              """Send exactly one reminder per 59-day inactivity cycle and cache that fact."""
+              output_path = os.environ.get("GITHUB_OUTPUT")
+              if output_path:
+                  with open(output_path, "a", encoding="utf-8") as output:
+                      output.write("reminder_sent=false\n")
+
+              eligible = os.environ.get("REMINDER_ELIGIBLE", "").strip().lower() == "true"
+              cache_hit = os.environ.get("REMINDER_CACHE_HIT", "").strip().lower() == "true"
+              if not eligible or cache_hit:
+                  return
+
+              ping_text, ping_mentions = build_ping()
+
+              title = "## GitHub Workflow Re-enable Reminder"
+              body = (
+                  "**Action Required:** Re-enable this workflow **the day after this message is sent**.\n\n"
+                  "This repository has had no repository activity for at least 59 days.\n"
+                  "GitHub automatically disables scheduled workflows in public repositories after 60 days "
+                  "without repository activity.\n\n"
+                  "**Do not wait until the workflow is disabled. Re-enable it the next day to keep monitoring active.**"
+              )
+
+              components = []
+              if ping_text:
+                  components.append({"type": 10, "content": ping_text})
+
+              container = [
+                  {"type": 10, "content": title},
+                  {"type": 14, "spacing": 1},
+                  {"type": 10, "content": body},
+              ]
+              components.append({"type": 17, "components": container})
+
+              forum_title = make_forum_title(f"{PROJECT_NAME} - Workflow Re-enable Reminder")
+              response = send_discord(
+                  components,
+                  ping_mentions,
+                  thread_name=forum_title,
+              )
+              if response and response.get("channel_id"):
+                  print(f"Created inactivity reminder Forum post/thread {response.get('channel_id')}.")
+              else:
+                  print("Sent inactivity reminder; Discord did not return a Forum thread ID.")
+
+              marker = Path(os.environ["REMINDER_CACHE_MARKER"])
+              marker.parent.mkdir(parents=True, exist_ok=True)
+              marker.write_text("reminded\n", encoding="utf-8")
+
+              if output_path:
+                  with open(output_path, "a", encoding="utf-8") as output:
+                      output.write("reminder_sent=true\n")
 
           _last_discord_send_at = {"t": None}
 
@@ -505,6 +593,11 @@ jobs:
 
 
           def main():
+              # Runs unconditionally, before anything else, so it still gets
+              # checked even when there's nothing new to report (the common
+              # case on almost every run) or if the commit check below fails.
+              maybe_send_inactivity_reminder()
+
               commits = get_recent_commits()
               if not commits:
                   print("No commits returned from API.")
@@ -596,3 +689,10 @@ jobs:
               git push
             fi
           fi
+
+      - name: Save 59-day inactivity reminder state
+        if: ${{ !cancelled() && steps.monitor.outputs.reminder_sent == 'true' && steps.inactivity-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .github/.workflow-inactivity-reminder.marker
+          key: ${{ steps.inactivity.outputs.cache_key }}
