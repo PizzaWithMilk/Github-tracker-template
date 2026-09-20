@@ -24,14 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      REPOS: |
+      REPOS: |                                  # Add one repository per line using: "OWNER/REPO|Project Name|TAG_ID" The TAG_ID is optional. Leave the third field out if no Forum tag should be applied. Multiple tags can be supplied as comma-separated IDs: "OWNER/REPO|Project Name|TAG_ID_1,TAG_ID_2"
         OWNER/REPO|Project Name
-        # OWNER/REPO-2|Project Name 2
-        # Add one repository per line using: OWNER/REPO|Project Name
+        # e.g. OWNER/REPO|Project Name|TAG_ID  
       STATE_DIR: ".github/monitor-state"        # <-- CHANGE THIS if you want the monitor state stored somewhere else.
-      PING_MODE: "user"                     # one of: user, role, everyone, none - see README.md
-      PING_ID: "YOUR_DISCORD_USER_ID_HERE"  # only needed when PING_MODE is "user" or "role" Leave default when PING_MODE is set to everyone/none
-      NOTIFY_ON_INITIAL_RUN: "true"         # set to "false" to silently record the current latest item on first run instead of posting/pinging about it
+      PING_MODE: "user"                         # one of: user, role, everyone, none - see README.md
+      PING_ID: "YOUR_DISCORD_USER_ID_HERE"      # only needed when PING_MODE is "user" or "role" Leave default when PING_MODE is set to everyone/none
+      NOTIFY_ON_INITIAL_RUN: "true"             # set to "false" to silently record the current latest item on first run instead of posting/pinging about it
 
     steps:
       - name: Checkout monitor state
@@ -117,26 +116,42 @@ jobs:
 
 
           def parse_repositories(raw):
-              """Parse one monitored repository per line as OWNER/REPO|Project Name."""
+              """Parse OWNER/REPO|Project Name with an optional comma-separated Forum tag ID list."""
               repositories = []
               for line_number, raw_line in enumerate(raw.splitlines(), start=1):
                   line = raw_line.strip()
                   if not line or line.startswith("#"):
                       continue
 
-                  parts = line.split("|", 1)
+                  parts = line.split("|", 2)
                   repo = parts[0].strip()
-                  project_name = parts[1].strip() if len(parts) == 2 else repo.rsplit("/", 1)[-1]
+                  project_name = parts[1].strip() if len(parts) >= 2 else repo.rsplit("/", 1)[-1]
+
+                  tag_ids = []
+                  if len(parts) == 3:
+                      tag_ids = [tag.strip() for tag in parts[2].split(",") if tag.strip()]
 
                   if not re.fullmatch(r"[^/\s]+/[^/\s]+", repo):
                       raise ValueError(
                           f"Invalid REPOS entry on line {line_number}: {repo!r}. "
-                          "Expected OWNER/REPO|Project Name."
+                          "Expected OWNER/REPO|Project Name[|TAG_ID[,TAG_ID...]]."
                       )
                   if not project_name:
                       project_name = repo.rsplit("/", 1)[-1]
 
-                  repositories.append((repo, project_name))
+                  for tag_id in tag_ids:
+                      if not re.fullmatch(r"\d+", tag_id):
+                          raise ValueError(
+                              f"Invalid Forum tag ID on line {line_number}: {tag_id!r}. "
+                              "Forum tag IDs must be numeric Discord IDs."
+                          )
+                  if len(tag_ids) > 5:
+                      raise ValueError(
+                          f"Too many Forum tag IDs on line {line_number} ({len(tag_ids)}). "
+                          "Discord allows at most 5 applied tags per Forum post."
+                      )
+
+                  repositories.append((repo, project_name, tag_ids))
 
               if not repositories:
                   raise ValueError(
@@ -144,7 +159,6 @@ jobs:
                   )
 
               return repositories
-
 
           def state_path_for_repo(repo):
               """Return a filesystem-safe state filename unique to the monitored repo."""
@@ -274,7 +288,10 @@ jobs:
               ]
               components.append({"type": 17, "components": container})
 
-              forum_title = make_forum_title(f"{PROJECT_NAME} - Workflow Re-enable Reminder")
+              # Not tied to any single monitored repo (this fires before any repo in
+              # REPOS has been processed this run), so the title can't include a
+              # per-repo project name - PROJECT_NAME is still unset at this point.
+              forum_title = make_forum_title("Workflow Re-enable Reminder")
               response = send_discord(
                   components,
                   ping_mentions,
@@ -296,7 +313,7 @@ jobs:
           _last_discord_send_at = {"t": None}
 
 
-          def send_discord(components, allowed_mentions=None, thread_name=None, thread_id=None):
+          def send_discord(components, allowed_mentions=None, thread_name=None, thread_id=None, applied_tags=None):
               # Throttle sends to avoid tripping Discord's rate limit.
               last_sent = _last_discord_send_at["t"]
               if last_sent is not None:
@@ -322,6 +339,8 @@ jobs:
               # Forum-channel webhooks require thread_name when creating a new post.
               if thread_name:
                   payload["thread_name"] = thread_name
+                  if applied_tags:
+                      payload["applied_tags"] = [str(tag_id) for tag_id in applied_tags]
 
               body = json.dumps(payload).encode("utf-8")
 
@@ -513,7 +532,7 @@ jobs:
               return messages or [[("text", text)]]
 
 
-          def send_release(release, ping, note=None):
+          def send_release(release, ping, note=None, applied_tags=None):
               tag, release_url, author, notes = release_meta(release)
 
               title = f"## {PROJECT_NAME} Updated!"
@@ -620,6 +639,7 @@ jobs:
                           components,
                           mentions,
                           thread_name=forum_title,
+                          applied_tags=applied_tags,
                       )
                       thread_id = response.get("channel_id")
                       if not thread_id:
@@ -658,8 +678,10 @@ jobs:
               clear_thread_progress()
 
 
-          def monitor_repository(repo, project_name, ping_sent):
+          def monitor_repository(repo, project_name, applied_tag_ids, ping_sent):
               configure_repository(repo, project_name)
+              if applied_tag_ids:
+                  print(f"Forum tags configured for {REPO}: {', '.join(applied_tag_ids)}")
 
               releases = get_recent_releases()
               if not releases:
@@ -711,7 +733,7 @@ jobs:
 
               for i, release in enumerate(new_releases):
                   should_ping = not ping_sent
-                  send_release(release, ping=should_ping, note=(note if i == 0 else None))
+                  send_release(release, ping=should_ping, note=(note if i == 0 else None), applied_tags=applied_tag_ids)
                   # Save after each release so a mid-batch failure cannot cause a repost.
                   STATE.write_text(release.get("tag_name", "").strip() + "\n")
                   if should_ping:
@@ -727,12 +749,12 @@ jobs:
 
               ping_sent = False
               had_error = False
-              for repo, project_name in parse_repositories(REPOS_RAW):
+              for repo, project_name, applied_tag_ids in parse_repositories(REPOS_RAW):
                   # Isolate failures per repo - one repo that 404s, times out, or is
                   # otherwise broken should not stop every repo listed after it from
                   # being checked, especially since this reruns every 5 minutes.
                   try:
-                      ping_sent = monitor_repository(repo, project_name, ping_sent)
+                      ping_sent = monitor_repository(repo, project_name, applied_tag_ids, ping_sent)
                   except Exception as error:
                       had_error = True
                       print(f"Error while monitoring {repo}: {error}")
@@ -763,11 +785,28 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "No state changes to commit."
-          else
-            git commit -m "Update monitor state ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
-            git pull --rebase origin "${GITHUB_REF_NAME}"
-            git push
+            exit 0
           fi
+
+          git commit -m "Update monitor state ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+
+          # Retry the rebase+push a few times: if another monitor workflow run
+          # (e.g. this template's non-forum counterpart, which shares the same
+          # default concurrency group) pushes to this branch at the same
+          # moment, a single pull+push can lose the race. Each state file is
+          # repo-specific, so there's never a real conflict to resolve here -
+          # just a timing window to retry through.
+          for attempt in 1 2 3 4 5; do
+            if git pull --rebase origin "${GITHUB_REF_NAME}" && git push; then
+              echo "State pushed successfully."
+              exit 0
+            fi
+            echo "Push attempt $attempt/5 failed, retrying..."
+            sleep $((attempt * 3))
+          done
+
+          echo "::error::Failed to push state update after multiple attempts."
+          exit 1
 
       - name: Save 59-day inactivity reminder state
         if: ${{ !cancelled() && steps.monitor.outputs.reminder_sent == 'true' && steps.inactivity-cache.outputs.cache-hit != 'true' }}
