@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: repo-release-monitor   # <-- CHANGE THIS if you add more than one monitor to the same repo. if you don't, both monitors will confilct and cancel eachother out. e.g. "winutil-repo-release-monitor"
+  group: repo-release-monitor   # <-- CHANGE THIS if you add more than one monitor to the same repo. if you don't, both monitors will confilct and cancel eachother out.
   cancel-in-progress: true
 
 jobs:
