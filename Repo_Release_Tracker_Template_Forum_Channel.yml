@@ -190,13 +190,12 @@ jobs:
 
               ping_text, ping_mentions = build_ping()
 
-              title = "## GitHub Workflow Re-enable Reminder"
+              title = "## Workflow Re-enable Reminder"
               body = (
                   "**Action Required:** Re-enable this workflow **the day after this message is sent**.\n\n"
-                  "This repository has had no repository activity for at least 59 days.\n"
-                  "GitHub automatically disables scheduled workflows in public repositories after 60 days "
-                  "without repository activity.\n\n"
-                  "**Do not wait until the workflow is disabled. Re-enable it the next day to keep monitoring active.**"
+                  "This repository has been inactive for 59 days, and GitHub may automatically disable scheduled workflows after 60 days without repository activity.\n\n"
+                  "**Please re-enable this workflow tomorrow to prevent the monitoring system from being disabled.**\n\n"
+                  "No action is required today. **The workflow should be re-enabled the day after this reminder is sent.**"
               )
 
               components = []
