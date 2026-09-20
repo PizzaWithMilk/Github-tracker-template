@@ -2,7 +2,7 @@
 
 ## What this actually does
 
-These are ready-to-use automation files for GitHub. Once you set one up, it quietly checks a GitHub repo (project) every 5 minutes, and if something new shows up — a new release or a new commit — it automatically posts a message about it in a Discord channel. You don't need to run anything on your own computer; GitHub runs it for you, on a timer, forever (or until you turn it off).
+These are ready-to-use automation files for GitHub. Once you set one up, it quietly checks a GitHub repo (project) every 5 minutes, and if something new shows up — a new release or a new commit — it automatically posts a message about it in a Discord channel. You don't need to run anything on your own computer; GitHub runs it for you, on a timer, forever (or until you turn it off). It also watches out for a separate GitHub quirk that can silently turn it off on its own — see [Inactivity reminder](#inactivity-reminder) below.
 
 There are four template files. You'll use one or two of them, not all four — the table below helps you pick.
 
@@ -23,8 +23,8 @@ If you already know GitHub Actions and Discord webhooks well, skip this part. If
 
 |  | Notifies you about | Regular text channel | Forum channel |
 |---|---|---|---|
-| **Releases** | New GitHub Releases (version tags, with release notes) | `repo-release-monitor-template.yml` | `Repo_Release_Tracker_Template_-_Forum_Channel_-_Resume_Safe.yml` |
-| **Commits** | New commits pushed to the default branch | `repo-commit-monitor-template.yml` | `Repo_Commit_Tracker_Template_-_Forum_Channel_-_Resume_Safe.yml` |
+| **Releases** | New GitHub Releases (version tags, with release notes) | `Repo_Release_Tracker_Template.yml` | `Repo_Release_Tracker_Template_Forum_Channel.yml` |
+| **Commits** | New commits pushed to the default branch | `Repo_Commit_Tracker_Template.yml` | `Repo_Commit_Tracker_Template_Forum_Channel.yml` |
 
 **Not sure which kind of Discord channel you have?** Look at the channel in Discord:
 
@@ -56,7 +56,7 @@ Take this step by step — none of it requires programming knowledge, just caref
 
 If the `.github/workflows/` folder doesn't already exist in that repo, you'll need to create it. Two ways to do this:
 
-- **Directly on GitHub.com (no software needed):** Open your repo in a browser → click **Add file → Create new file**. In the box where you'd normally type a filename, type the *entire path* including the folders, like this: `.github/workflows/release-monitor.yml`. As soon as you type each `/`, GitHub automatically creates that folder for you — you don't need to create `.github` and `workflows` as separate steps. Paste in the full contents of the template file.
+- **Directly on GitHub.com (no software needed):** Open your repo in a browser → click **Add file → Create new file**. In the box where you'd normally type a filename, type the *entire path* including the folders, like this: `.github/workflows/release-monitor.yml`. As soon as you type each `/`, GitHub automatically creates that folder for you — you don't need to create `.github` and `workflows` as separate steps. Paste in the full contents of the template file, then scroll down and click **Commit changes**.
 - **On your own computer, using git:** inside a local copy (clone) of the repo, run `mkdir -p .github/workflows` to create the folder, save the template file inside it (keep the `.yml` file ending), then run `git add .github/workflows/<filename>.yml`, `git commit -m "Add repo monitor"`, and `git push` to send it up to GitHub.
 
 The exact filename you save it as inside that folder doesn't matter — `release-monitor.yml`, `otd-monitor.yml`, anything — as long as it ends in `.yml` and sits inside `.github/workflows/`.
@@ -205,11 +205,28 @@ In plain terms: this workflow is built to quietly recover from small, temporary 
 
 Some projects write plain issue/PR references like `#123` in their release notes; others (especially auto-generated changelogs) write the full web address instead, like `https://github.com/owner/repo/pull/123`. GitHub turns both of these into clickable links automatically on its own website — but Discord does neither on its own. So this workflow converts both styles into proper clickable Discord links before posting, so they work no matter which style the original text used. If something is already written as a clickable link, it's left alone rather than being turned into a broken double-link.
 
+### Inactivity reminder
+
+This is unrelated to releases or commits — it's a safety net for a separate GitHub rule: **if a repo goes 60 days with absolutely no commits pushed to it, GitHub automatically disables any scheduled workflows in that repo**, this one included. That can happen silently, with no warning from GitHub — you'd typically only notice once you realize notifications have quietly stopped.
+
+This matters most if you followed the suggestion in Step 1 to put this workflow in its own small, dedicated repo rather than one that already gets commits for other reasons. A repo used for nothing but hosting this workflow only ever gets a new commit when the workflow itself finds something new to report — so if the project you're monitoring goes quiet for a couple of months, that hosting repo could genuinely rack up 60 days of silence and get shut off without you ever being told.
+
+To guard against that, every single run also quietly checks one extra thing: "has it been at least 59 days since the last commit to this repo?" If so — and only if you haven't already been sent this particular reminder — it posts a one-time Discord message titled **"GitHub Workflow Re-enable Reminder"**, pinging whoever you've already configured via `PING_MODE`/`PING_ID`.
+
+**Important: this message can't actually stop GitHub from disabling the workflow** — that decision is entirely GitHub's, made outside this workflow, and nothing a workflow run does from the inside can prevent it. What this message *does* do is warn you a day ahead of time, so once the workflow does get disabled, it isn't a surprise — you'll already know to go to your repo's **Actions** tab, click the workflow, and click **Re-enable workflow**, which starts everything running again immediately and takes about ten seconds.
+
+A few more details worth knowing:
+
+- You won't be spammed with this every 5 minutes once the 59-day mark passes — it's remembered (using GitHub's own Actions cache), so you'll only be told about a given quiet stretch once, not on every single run afterward.
+- Any new commit to the repo — including this workflow's own bookmark-file update, the moment the thing you're monitoring becomes active again — resets the clock automatically. You won't hear about it again unless another full 59 days of total silence pass.
+- If the repo stays inactive even after you re-enable it, expect to be reminded again roughly every 59 days for as long as that remains true.
+- This is fully automatic — there's nothing extra to set up or configure. It reuses the same `PING_MODE` and `PING_ID` settings you already filled in for regular notifications.
+
 ## Troubleshooting
 
 **Nothing posted, and there's no error in the Actions tab.** This is very likely completely normal — most runs find nothing new, since most 5-minute windows don't have a new release or commit in them. Open the run's log and look for a line like `No new release.` or `No new commit.` — if you see that, everything is working correctly. If you expected something to have posted and didn't, double-check that `REPO` is spelled exactly right (`owner/repo-name`, and capitalization matters), and that the release/commit genuinely exists on the repo's default (main) branch — the commit monitor only ever watches the default branch.
 
-**The workflow doesn't seem to run on its own schedule at all.** GitHub automatically disables scheduled workflows in a repo that's had no activity (no commits) for 60 days — if that's happened, push any small commit to the repo, or go re-enable the workflow manually from the Actions tab. Scheduled runs can also sometimes be delayed by several minutes when GitHub itself is under heavy load — that's a limitation on GitHub's end, not something this workflow controls.
+**The workflow doesn't seem to run on its own schedule at all.** GitHub automatically disables scheduled workflows in a repo that's had no commit activity for 60 days. If that's happened, go re-enable it manually from the Actions tab — these templates try to warn you about this a day in advance over Discord (see [Inactivity reminder](#inactivity-reminder) above), so you shouldn't be caught completely off guard, but the fix either way is the same: **Actions tab → the workflow → Re-enable workflow**. Scheduled runs can also sometimes be delayed by several minutes when GitHub itself is under heavy load — that's a limitation on GitHub's end, not something this workflow controls.
 
 **Discord shows an error, or nothing shows up in the channel.** First, double check the `DISCORD_WEBHOOK` secret is set on the *same repo* the workflow file lives in (Settings → Secrets and variables → Actions). Also check that the webhook still exists and hasn't been deleted or regenerated on the Discord side — regenerating a webhook changes its URL, which would break it. The run's log will show you the exact error Discord sent back, which usually explains exactly what's wrong.
 
@@ -240,3 +257,5 @@ Some projects write plain issue/PR references like `#123` in their release notes
 **Will this notify me about draft releases or prereleases?** No, not by default — it only notifies about a repo's actual "latest release," the same definition GitHub itself uses, which excludes drafts and prereleases. If you specifically want prereleases included too, that requires a small edit inside the script itself (removing one filter condition) — it's not something you can turn on just by changing a setting.
 
 **Will I hit GitHub's rate limits by running this?** No, in virtually all normal cases. GitHub limits how many API requests you can make without logging in to 60 per hour, but this workflow automatically authenticates every request using the token GitHub provides for free, which raises that limit dramatically — high enough that you'd need to be running an unusually large number of these monitors from a single repo before it would ever become a concern.
+
+**Why did I get a Discord message titled "GitHub Workflow Re-enable Reminder"?** That's expected — not an error, and nothing is broken. It means the repo hosting this workflow hasn't had a commit in about 59 days, which is right before GitHub's own 60-day cutoff for automatically disabling scheduled workflows. See [Inactivity reminder](#inactivity-reminder) above for the full explanation; the short version is: check the **Actions** tab in a day or so, and if the workflow has been disabled, click **Re-enable workflow**.
