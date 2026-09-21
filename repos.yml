@@ -14,21 +14,25 @@ repos:
    # Inherits the global role ping
 #  - repo: owner/project-one
 #    type: normal
+#    monitor: release
 
   # Overrides the global ping with a specific user
 #  - repo: owner/project-two
 #    type: normal
+#    monitor: release
 #    ping: user
 #    ping_id: 222222222222222222
 
   # Overrides the global ping with @everyone
 #  - repo: owner/project-three
 #    type: normal
+#    monitor: release
 #    ping: everyone
 
   # Disables pinging entirely
 #  - repo: owner/project-four
 #    type: normal
+#    monitor: release
 #    ping: none
 
   # Uses a different role ID but keeps the global role mode
@@ -39,12 +43,14 @@ repos:
   # Forum repository using global ping
 #  - repo: owner/project-six
 #    type: forum
+#    monitor: commit
 #    tags:
 #      - 111111111111111111
 
   # Forum + user + multiple tags
 #  - repo: owner/project-seven
 #    type: forum
+#    monitor: commit
 #    ping: user
 #    ping_id: 444444444444444444
 #    tags:
@@ -55,6 +61,7 @@ repos:
   # Forum + no ping + five tags
 #  - repo: owner/project-eight
 #    type: forum
+#    monitor: commit
 #    ping: none
 #    tags:
 #      - 111111111111111111
