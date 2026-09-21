@@ -5,7 +5,7 @@
 # choosing. See README.md for setup instructions.
 # ============================================================================
 
-name: Repo Commit Monitor   # <-- CHANGE THIS to something unique, e.g. "MyProject Commit Monitor"
+name: Repo Commit Monitor   
 
 on:
   schedule:
@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: repo-commit-monitor   # <-- CHANGE THIS if you add more than one monitor to the same repo. if you don't, both monitors will confilct and cancel eachother out.
+  group: repo-commit-monitor   
   cancel-in-progress: true
 
 jobs:
