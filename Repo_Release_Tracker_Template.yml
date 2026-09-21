@@ -5,7 +5,7 @@
 # repo of your choosing. See README.md for setup instructions.
 # ============================================================================
 
-name: Repo Release Monitor   # <-- CHANGE THIS to something unique, e.g. "MyProject Release Monitor"
+name: Repo Release Monitor   
 
 on:
   schedule:
@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: repo-release-monitor    # <-- CHANGE THIS if you add more than one monitor to the same repo. if you don't, both monitors will confilct and cancel eachother out.
+  group: repo-release-monitor    
   cancel-in-progress: true
 
 jobs:
