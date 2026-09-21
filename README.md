@@ -12,7 +12,7 @@ If you already know GitHub Actions and Discord webhooks well, skip this part. If
 
 - **Repo (repository):** a project's folder of files on GitHub.
 - **Workflow:** an automation recipe GitHub runs for you. It's a text file ending in `.yml`, and it lives in a special folder called `.github/workflows/` inside a repo. The files in this README *are* workflows.
-- **Config file:** a separate small text file, `config/repos.yml`, that lists which repo(s) to watch and who to ping. It's not a workflow itself — it's data the workflow reads. Explained in full in [Step 3](#step-3-create-your-reposyml-config-file).
+- **Config file:** a separate small text file, `config/repos.yml`, that lists which repo(s) to watch and who to ping. It's not a workflow itself — it's data the workflow reads. Explained in full in [Step 2](#step-2-create-your-reposyml-config-file).
 - **Webhook:** a special web address (URL) that Discord gives you for one specific channel. Any program that sends a message to that address will have its message posted in that channel — no bot, no login, no password needed on Discord's side. Anyone who has the URL can post to your channel with it, so it's treated like a secret.
 - **Secret (in GitHub):** a private value — like a password or webhook URL — that you store in your repo's settings. Workflows can use it, but it's never shown in logs and no one browsing your repo can see its value once it's saved.
 - **State directory:** a small folder this workflow keeps inside your repo, purely to remember "the last thing I already told you about" — one small bookmark file per repo you're watching, named automatically. You never need to create or edit these files yourself.
