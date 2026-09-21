@@ -343,6 +343,28 @@ jobs:
               return text
 
 
+          VERSION_PATTERN_EXPLICIT = re.compile(
+              r"(?i)\b(?:version|ver|update|updated|release|bump|bumped)(?:\s+to)?\s*[:=#-]?\s*(v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b"
+          )
+          VERSION_PATTERN_BARE = re.compile(
+              r"(?<![\w.-])(v\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)(?![\w.-])",
+              re.IGNORECASE,
+          )
+
+
+          def extract_update_version(message):
+              """Find an update/release version in a commit message, or return Unknown."""
+              match = VERSION_PATTERN_EXPLICIT.search(message)
+              if match:
+                  return match.group(1)
+
+              match = VERSION_PATTERN_BARE.search(message)
+              if match:
+                  return match.group(1)
+
+              return "Unknown"
+
+
           def commit_meta(commit):
               sha = commit["sha"]
               short_sha = sha[:7]
@@ -352,9 +374,10 @@ jobs:
                   author.get("login")
                   or commit["commit"]["author"].get("name", "Unknown")
               )
-              message = commit["commit"]["message"].strip() or "(No commit message.)"
-              message = linkify_issue_refs(message)
-              return short_sha, commit_url, author_name, message
+              raw_message = commit["commit"]["message"].strip() or "(No commit message.)"
+              version = extract_update_version(raw_message)
+              message = linkify_issue_refs(raw_message)
+              return short_sha, commit_url, author_name, version, message
 
 
           HEADING_PATTERN = re.compile(r"^#{1,6}\s+\S")
@@ -449,12 +472,12 @@ jobs:
 
 
           def send_commit(commit, ping, note=None, ping_mode=None, ping_id=None):
-              short_sha, commit_url, author_name, message = commit_meta(commit)
+              short_sha, commit_url, author_name, version, message = commit_meta(commit)
 
               title = f"## {PROJECT_NAME} Updated!"
               meta_lines = (
                   f"**Author:** {author_name}\n"
-                  f"**Commit:** `{short_sha}`\n"
+                  f"**Version:** {version}\n"
                   f"**Link:** {commit_url}"
               )
               meta_block = f"{note}\n\n{meta_lines}" if note else meta_lines
