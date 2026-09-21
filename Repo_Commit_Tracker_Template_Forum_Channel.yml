@@ -222,6 +222,8 @@ jobs:
                     - FORUM_TAG_ID
 
               The type field is required and must be either normal or forum.
+              The monitor field is optional and defaults to both. Use commits to enable only the
+              Commit Monitor, releases to enable only the Release Monitor, or both to enable both.
               The per-repository ping and ping_id fields are optional. Missing ping settings
               inherit the global ping_mode/ping_id from config/repos.yml.
               Forum tags are optional and only used by Forum-channel workflows.
@@ -229,7 +231,7 @@ jobs:
               """
               repositories = []
               valid_ping_modes = {"user", "role", "everyone", "none"}
-              allowed_keys = {"repo", "type", "ping", "ping_id", "tags"}
+              allowed_keys = {"repo", "type", "monitor", "ping", "ping_id", "tags"}
               configs = []
               current = None
               current_list_key = None
@@ -309,6 +311,7 @@ jobs:
               for index, config in enumerate(configs, start=1):
                   repo = config.get("repo", "").strip()
                   repo_type = config.get("type", "").strip().lower()
+                  monitor_type = config.get("monitor", "both").strip().lower()
                   project_name = repo.rsplit("/", 1)[-1]
                   per_repo_ping_mode = config.get("ping", "").strip().lower()
                   per_repo_ping_id = config.get("ping_id", "").strip()
@@ -324,6 +327,11 @@ jobs:
                       raise ValueError(
                           f"Invalid type in repository block {index}: {repo_type!r}. "
                           "Use 'normal' or 'forum'."
+                      )
+                  if monitor_type not in {"commits", "releases", "both"}:
+                      raise ValueError(
+                          f"Invalid monitor in repository block {index}: {monitor_type!r}. "
+                          "Use 'commits', 'releases', or 'both'."
                       )
                   if not re.fullmatch(r"[^/\s]+/[^/\s]+", repo):
                       raise ValueError(
@@ -360,7 +368,7 @@ jobs:
                   if ping_mode in {"everyone", "none"}:
                       ping_id = ""
 
-                  repositories.append((repo, project_name, repo_type, tag_ids, ping_mode, ping_id))
+                  repositories.append((repo, project_name, repo_type, monitor_type, tag_ids, ping_mode, ping_id))
 
               if not repositories:
                   raise ValueError(
@@ -380,9 +388,13 @@ jobs:
               """Return a filesystem-safe Forum-thread resume-state filename unique to
               the monitored repo. Scoped per repo (not a single shared file) so that
               isolating one repo's failure from the others (see main()) can never let
-              one repo's successful post clear another repo's in-progress resume state."""
+              one repo's successful post clear another repo's in-progress resume state.
+              Also suffixed by release/commit, same as state_path_for_repo, so a repo
+              with monitor: both never lets its release-forum and commit-forum resume
+              files collide with each other."""
               key = re.sub(r"[^A-Za-z0-9._-]+", "_", repo.replace("/", "__"))
-              return STATE_DIR / f"{key}_thread.json"
+              suffix = "release" if API_URL.startswith("https://api.github.com/repos/") and "/releases" in API_URL else "commit"
+              return STATE_DIR / f"{key}_{suffix}_thread.json"
 
 
           def configure_repository(repo, project_name):
@@ -984,9 +996,9 @@ jobs:
               maybe_send_inactivity_reminder()
 
               had_error = False
-              # Each repository is processed only by the matching normal/forum workflow.
-              for repo, project_name, repo_type, applied_tag_ids, ping_mode, ping_id in parse_repositories(REPOS_RAW):
-                  if repo_type != "forum":
+              # Each repository is processed only by the matching normal/forum workflow and selected monitor type.
+              for repo, project_name, repo_type, monitor_type, applied_tag_ids, ping_mode, ping_id in parse_repositories(REPOS_RAW):
+                  if repo_type != "forum" or monitor_type not in {"commits", "both"}:
                       continue
                   # Isolate failures per repo - one repo that 404s, times out, or is
                   # otherwise broken should not stop every repo listed after it from
