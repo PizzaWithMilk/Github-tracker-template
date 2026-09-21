@@ -63,14 +63,7 @@ If the `.github/workflows/` folder doesn't already exist in that repo, you'll ne
 
 The exact filename you save it as inside that folder doesn't matter — `release-monitor.yml`, `otd-monitor.yml`, anything — as long as it ends in `.yml` and sits inside `.github/workflows/`.
 
-### Step 2: Give it a unique name
-
-Near the top of the file, you'll see two things to change:
-
-- `name:` — this is just the label you'll see for this workflow in GitHub's **Actions** tab. Change it to something you'll recognize, e.g. `"winutil Release Monitor"`.
-- `concurrency: group:` — this needs to be **unique** compared to any other monitor workflow you set up in the same repo. If you ever add a second monitor to the same repo and forget to give it a different value here, the two monitors will interfere with each other and randomly cancel each other's runs. **This matters even between different template files that otherwise look unrelated** — a release monitor and its forum-channel counterpart both default to the exact same `concurrency: group:` value out of the box, so if you use both in the same repo, change at least one of them.
-
-### Step 3: Create your repos.yml config file
+### Step 2: Create your repos.yml config file
 
 This is where you tell the workflow which repo(s) to watch and who to ping — it's a separate file from the workflow itself.
 
@@ -92,17 +85,17 @@ Every repo block needs, at minimum, `repo:` (written as `OWNER/REPO`, and it has
 
 3. If `CONFIG_FILE` in the workflow's `env:` block still says `config/repos.yml` (the default), you don't need to change anything else in the workflow file — just make sure `repos.yml` actually lives at that exact path in the repo.
 
-### Step 4: Fill in the workflow's settings block
+### Step 3: Fill in the workflow's settings block
 
 Further down in the file, under `jobs: monitor: env:`, you'll find a small block of settings:
 
 | Setting | What it means |
 |---|---|
-| `CONFIG_FILE` | Path to the `repos.yml` file you created in Step 3, relative to the root of this repo. The default, `config/repos.yml`, is fine as long as you put the file there — change this only if you saved it somewhere else, or you want this particular workflow to read a *different* config file than another monitor in the same repo (see [Sharing one repos.yml across templates](#sharing-one-reposyml-across-templates)). |
+| `CONFIG_FILE` | Path to the `repos.yml` file you created in Step 2, relative to the root of this repo. The default, `config/repos.yml`, is fine as long as you put the file there — change this only if you saved it somewhere else, or you want this particular workflow to read a *different* config file than another monitor in the same repo (see [Sharing one repos.yml across templates](#sharing-one-reposyml-across-templates)). |
 | `STATE_DIR` | The folder (inside this repo) where the workflow keeps its bookmark files — one small file per repo listed in `repos.yml`, named automatically, so you never have to think about individual filenames. The default, `.github/monitor-state`, is fine for almost everyone; change it only if you specifically want these files stored somewhere else. |
 | `NOTIFY_ON_INITIAL_RUN` | `"true"` (the default) or `"false"`. Controls what happens the first time this monitor checks a given repo — see [First run behavior](#first-run-behavior) below. |
 
-### Step 5: Create and add the Discord webhook
+### Step 4: Create and add the Discord webhook
 
 This is how the workflow is actually able to post into your Discord channel.
 
@@ -119,7 +112,7 @@ That's it for the webhook — you never paste the URL directly into the workflow
 
 You do **not** need to do anything for `GITHUB_TOKEN` — GitHub creates and provides this automatically for every workflow run. This workflow uses it to talk to GitHub's API a bit more freely, and to save its own bookmark files back into the repo.
 
-### Step 6: Turn it on and check it worked
+### Step 5: Turn it on and check it worked
 
 Commit and push both files if you haven't already (or click **Commit changes** if you used the GitHub.com website). Once they're saved, the workflow will start running automatically every 5 minutes, forever, without you needing to do anything else.
 
@@ -134,7 +127,7 @@ A run with a green checkmark ✅ means everything worked. A red ✕ means someth
 
 ## Monitoring multiple repositories
 
-Every repo you want to watch goes in the `repos:` list inside `config/repos.yml` (see [Step 3](#step-3-create-your-reposyml-config-file)):
+Every repo you want to watch goes in the `repos:` list inside `config/repos.yml` (see [Step 2](#step-2-create-your-reposyml-config-file)):
 
 ```yaml
 ping_mode: user
