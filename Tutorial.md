@@ -23,13 +23,13 @@ Then paste `config/repos.yml` in the `name your file` box. should end up looking
 <img width="1920" height="1050" alt="zen_q1b2ATR6RC" src="https://github.com/user-attachments/assets/8b156a2b-53fd-4782-9a7a-ceb0aa0f5299" />
 
 Then paste the code from [repos.yml](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/repos.yml)
-<img width="1920" height="1050" alt="zen_OrdNQ8K0vQ" src="https://github.com/user-attachments/assets/cf1b56ed-7290-4895-81f2-c1dd5c00f4b1" />
+<img width="1920" height="1050" alt="zen_YNWJH9jOcx" src="https://github.com/user-attachments/assets/35e9cda1-2134-4096-aacb-43223916d009" />
 
-Then do whatever format you want under `repos:` you can use the examples for guidance. 
-<img width="1920" height="1050" alt="zen_SnpetLRF27" src="https://github.com/user-attachments/assets/09005b53-c693-4023-9d5e-ec65f3f6f5ab" />
+Then do whatever format you want under `repos:` you can use the examples for guidance.
+<img width="1920" height="1050" alt="zen_gwixpfipx4" src="https://github.com/user-attachments/assets/fc0bb18d-4fc3-45d7-83b8-e2a5a4778bea" />
 
 Then commit
-<img width="1920" height="1050" alt="zen_koEAy81hNG" src="https://github.com/user-attachments/assets/ae862127-feb3-4876-bda7-387d4b1295dc" />
+<img width="1920" height="1050" alt="zen_BeGdpgqNvT" src="https://github.com/user-attachments/assets/59eef54c-02c2-4b2d-9ff7-cf112e77e06b" />
 
 Then go to Settings → Secrets and variables → Actions → New repository secret.
 <img width="1920" height="1050" alt="zen_AJAGoWYRZS" src="https://github.com/user-attachments/assets/e743cf9d-2be6-4677-b4a1-62c114e1dece" />
