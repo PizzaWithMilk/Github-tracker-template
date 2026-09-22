@@ -79,7 +79,7 @@ repos:
     type: normal                          # normal | forum - must match the kind of channel this template posts to
 ```
 
-`ping_mode` and `ping_id` at the top are the *defaults* — used by every repo below that doesn't set its own. See [Choosing who gets pinged](#choosing-who-gets-pinged) for what each `ping_mode` value does, and [Monitoring multiple repositories](#monitoring-multiple-repositories) for the full list of fields a repo block can have (per-repo ping overrides, Forum tags, and — importantly — how one `repos.yml` can be shared across several of these templates at once).
+`ping_mode` and `ping_id` at the top are the *defaults* — used by every repo below that doesn't set its own. See [Choosing who gets pinged](#choosing-who-gets-pinged) for what each `ping_mode` value does, and [Monitoring multiple repositories](#monitoring-multiple-repositories) for the full list of fields a repo block can have (per-repo ping overrides, which kinds of updates to track, Forum tags, and — importantly — how one `repos.yml` can be shared across several of these templates at once).
 
 Every repo block needs, at minimum, `repo:` (written as `OWNER/REPO`, and it has to be the *first* field in the block) and `type:` (`normal` for a regular text-channel template, `forum` for a Forum-channel one — this has to match whichever template *this particular workflow file* is). There's no field for a custom display name — Discord will show the repo's own name (the part after the last `/`), e.g. `owner/winutil` is shown as `winutil`.
 
@@ -146,6 +146,25 @@ repos:
 
 Each repo block needs `repo:` and `type:` at minimum. `type` has to be either `normal` or `forum`, and has to match the kind of template this particular workflow file is — see [Sharing one repos.yml across templates](#sharing-one-reposyml-across-templates) below if you want to mix both kinds using one shared file.
 
+**Each repo can also choose which kind of updates it wants tracked**, with `monitor:` — mainly useful if you're sharing one `repos.yml` between a release-tracker and a commit-tracker and want different repos to get different treatment:
+
+```yaml
+repos:
+  - repo: ChrisTitusTech/winutil
+    type: normal
+    monitor: both        # the default - tracked by both a release-tracker and a commit-tracker, if you've deployed both
+
+  - repo: torvalds/linux
+    type: normal
+    monitor: releases    # only a release-tracker pointed at this file will report on this repo
+
+  - repo: someuser/some-other-repo
+    type: normal
+    monitor: commits     # only a commit-tracker pointed at this file will report on this repo
+```
+
+`monitor` defaults to `both` if you leave it out. Each *template* still only ever tracks its own kind of update — a release-tracker will never report a commit, no matter what `monitor` says. What `monitor` actually controls is whether that template pays attention to a given repo *at all*: setting `monitor: commits` on a repo means a release-tracker pointed at the same file will skip that repo entirely, as if it weren't listed there.
+
 **Each repo can also override the ping settings just for that one repo**, with `ping:` and `ping_id:`:
 
 ```yaml
@@ -195,7 +214,7 @@ repos:
 
 A few things worth being clear about:
 
-- **`type` doesn't decide releases vs. commits — which templates you deploy does.** If you set up both `Repo_Release_Tracker_Template.yml` and `Repo_Commit_Tracker_Template.yml` pointed at the same config, every `type: normal` repo in it gets *both* release notifications and commit notifications. If you only want one or the other for a given repo, only deploy the matching template(s) — `type` alone can't turn tracking off.
+- **`type` doesn't decide releases vs. commits — `monitor` does.** `type` only routes a repo to the normal-channel or forum-channel templates; it's `monitor` (`commits`, `releases`, or `both`) that controls whether a given repo gets release tracking, commit tracking, or both, when you have both kinds of templates pointed at the same file — see [Monitoring multiple repositories](#monitoring-multiple-repositories) above. It defaults to `both`, so a repo tracked by both a release-tracker and a commit-tracker gets notifications from each unless you set `monitor` to narrow that down.
 - You don't have to share a config file at all. If you'd rather keep things fully separate — say, a different set of repos for releases than for commits — just point each template's `CONFIG_FILE` setting at its own file instead (see Step 4).
 - A `type: forum` repo will make a forum-channel template try to post there — and it'll fail (see [Troubleshooting](#troubleshooting)) if that template's `DISCORD_WEBHOOK` isn't actually a Forum-channel webhook. `type` tells a workflow which repos to *handle*; it doesn't change which channel that workflow's own webhook actually points to.
 
@@ -329,7 +348,7 @@ A few more details worth knowing:
 
 ## Troubleshooting
 
-**The whole run fails immediately, before checking anything, and the log mentions something like `Invalid repository entry`, `Missing 'ping_id'`, `Invalid type`, or another config-related error.** Something in `config/repos.yml` isn't formatted correctly — a missing `/` in a repo name, a `ping:` value that isn't `user`/`role`/`everyone`/`none`, a `user`/`role` ping with no `ping_id` set, a repo block missing its required `type:`, or a setting misplaced outside the `repos:` section, for example. The error message names the exact line number to check. Unlike a single unreachable repo, a mistake in the config file blocks the *entire* run, since the workflow can't tell what to check yet. Fix the line and it'll pick back up on the next scheduled run (or click **Run workflow** to retry immediately).
+**The whole run fails immediately, before checking anything, and the log mentions something like `Invalid repository entry`, `Missing 'ping_id'`, `Invalid type`, `Invalid monitor`, or another config-related error.** Something in `config/repos.yml` isn't formatted correctly — a missing `/` in a repo name, a `ping:` value that isn't `user`/`role`/`everyone`/`none`, a `user`/`role` ping with no `ping_id` set, a repo block missing its required `type:`, a `monitor:` value that isn't `commits`/`releases`/`both`, or a setting misplaced outside the `repos:` section, for example. The error message names the exact line number to check. Unlike a single unreachable repo, a mistake in the config file blocks the *entire* run, since the workflow can't tell what to check yet. Fix the line and it'll pick back up on the next scheduled run (or click **Run workflow** to retry immediately).
 
 **The log says `Config file not found`.** The workflow's `CONFIG_FILE` setting (Step 4) points somewhere that doesn't actually have a `repos.yml` there — usually because the file was never committed, or it's saved at a different path than `CONFIG_FILE` says. Double-check the file exists in the repo at that exact path.
 
