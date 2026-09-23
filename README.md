@@ -1,5 +1,7 @@
 # Repo Monitor
 
+[📖 Visual Tutorial](Tutorial.md)
+
 ## What this actually does
 
 This is one ready-to-use automation file for GitHub. Once you set it up, it quietly checks one or more GitHub repos (projects) every 5 minutes, and if something new shows up — a new release or a new commit — it automatically posts a message about it in Discord. You don't need to run anything on your own computer; GitHub runs it for you, on a timer, forever (or until you turn it off).
