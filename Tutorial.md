@@ -10,7 +10,7 @@ Should end up looking like this
 Then put whatever name you want in the `name your file` box. make sure it ends with .yml
 <img width="1920" height="1050" alt="zen_FIbvdTZ7cx" src="https://github.com/user-attachments/assets/9d5e52a4-0996-4f2e-a2d1-446c7eb42a2f" />
 
-Then paste the code from either [Repo_Release_Tracker_Template.yml](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/Repo_Release_Tracker_Template.yml), [Repo_Release_Tracker_Template_Forum_Channel.yml](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/Repo_Release_Tracker_Template_Forum_Channel.yml), [Repo_Commit_Tracker_Template.yml](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/Repo_Commit_Tracker_Template.yml) or [Repo_Commit_Tracker_Template_Forum_Channel.yml](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/Repo_Commit_Tracker_Template_Forum_Channel.yml) 
+Then paste the code from [Repo_Monitor_Template.yml ](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/Repo_Monitor_Template.yml)
 <img width="1920" height="1050" alt="zen_sPOhh3WJ3L" src="https://github.com/user-attachments/assets/6b3adc97-4e2c-433a-b1ef-a131aa23ae78" />
 
 Then Commit
@@ -23,25 +23,13 @@ Then paste `config/repos.yml` in the `name your file` box. should end up looking
 <img width="1920" height="1050" alt="zen_q1b2ATR6RC" src="https://github.com/user-attachments/assets/8b156a2b-53fd-4782-9a7a-ceb0aa0f5299" />
 
 Then paste the code from [repos.yml](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/repos.yml)
-<img width="1920" height="1050" alt="zen_YNWJH9jOcx" src="https://github.com/user-attachments/assets/35e9cda1-2134-4096-aacb-43223916d009" />
+<img width="1920" height="1050" alt="zen_xh4Jwh3DmN" src="https://github.com/user-attachments/assets/8451236d-4825-4c98-9cdb-27ca693c5dc3" />
 
 Then do whatever format you want under `repos:` you can use the examples for guidance.
-<img width="1920" height="1050" alt="zen_gwixpfipx4" src="https://github.com/user-attachments/assets/fc0bb18d-4fc3-45d7-83b8-e2a5a4778bea" />
+<img width="1920" height="1050" alt="zen_Rmg2WxXNcj" src="https://github.com/user-attachments/assets/1b7ad102-2341-48ea-83b5-a86aa6028713" />
 
 Then commit
-<img width="1920" height="1050" alt="zen_BeGdpgqNvT" src="https://github.com/user-attachments/assets/59eef54c-02c2-4b2d-9ff7-cf112e77e06b" />
-
-Then go to Settings → Secrets and variables → Actions → New repository secret.
-<img width="1920" height="1050" alt="zen_AJAGoWYRZS" src="https://github.com/user-attachments/assets/e743cf9d-2be6-4677-b4a1-62c114e1dece" />
-
-Then name the secret `DISCORD_WEBHOOK`
-<img width="1920" height="1050" alt="image" src="https://github.com/user-attachments/assets/f4327275-f869-4cf2-a461-8d0df894dd51" />
-
-Then In Discord, go to the channel you want notifications posted into. Open its settings by click the gear icon, or right-click → Edit Channel then go to Integrations → Webhooks → New Webhook Give it any name you like, then click Copy Webhook URL and paste it into the secret box
-<img width="1920" height="1050" alt="image" src="https://github.com/user-attachments/assets/5bd3fd96-003b-4a43-8504-ecf5680ebbd3" />
-
-Then click add secret
-<img width="1920" height="1050" alt="image" src="https://github.com/user-attachments/assets/b7e302e9-58e8-4733-82e0-86f8c90a71db" />
+<img width="1920" height="1050" alt="zen_uXVuILxATp" src="https://github.com/user-attachments/assets/c4c79b5d-7a3a-4a5b-85f0-2ef4ff787b19" />
 
 Now you're all done. To make sure it works, Go to your repo's Actions tab. Click on the workflow's name in the list on the left. Click the Run workflow button. 
 <img width="1920" height="1050" alt="image" src="https://github.com/user-attachments/assets/9953ddd0-5410-4e79-88d5-59ceb4402d08" />
