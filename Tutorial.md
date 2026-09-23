@@ -25,7 +25,7 @@ Then paste `config/repos.yml` in the `name your file` box. should end up looking
 Then paste the code from [repos.yml](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/repos.yml)
 <img width="1920" height="1050" alt="zen_xh4Jwh3DmN" src="https://github.com/user-attachments/assets/8451236d-4825-4c98-9cdb-27ca693c5dc3" />
 
-Then do whatever format you want under `repos:` you can use the examples for guidance.
+Then do whatever format you want under `repos:` you can use the examples for guidance. Look at [README](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/README.md#Per-repo-settings) if you want to see what each field does
 <img width="1920" height="1050" alt="zen_Rmg2WxXNcj" src="https://github.com/user-attachments/assets/1b7ad102-2341-48ea-83b5-a86aa6028713" />
 
 Then commit
