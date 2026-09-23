@@ -1,72 +1,215 @@
-# ============================================================================
-# Shared repo + ping configuration, read by all four monitor workflows.
-# Save this file at: config/repos.yml  (or wherever CONFIG_FILE points)
-# ============================================================================
+# ============================================================
+# Repo Monitor Configuration
+# ============================================================
+#
+# IMPORTANT:
+# Every example repository below is commented out on purpose.
+# Uncomment and edit an example before using it.
+#
+# A repository entry needs:
+#   repo:     GitHub owner/repository name
+#   type:     normal or forum
+#   monitor:  commits, releases, or both
+#
+# ============================================================
+# GLOBAL SETTINGS
+# ============================================================
 
-# Defaults used by any repo below that doesn't set its own ping/ping_id,
-# and by the 59-day inactivity reminder.
-ping_mode: user                          # user | role | everyone | none
-ping_id: "YOUR_DISCORD_USER_ID_HERE"     # required only when ping_mode is user or role. also used for workflow re-enable reminder
+# Default Discord webhook used by every repository unless that
+# repository has its own "webhook:" setting.
+# WARNING: A webhook URL is effectively a credential. Do not put
+# a real webhook URL in a public repository.
+webhook: "https://discord.com/api/webhooks/PASTE_DEFAULT_WEBHOOK_HERE"
+
+# Default ping behavior.
+# Valid values: user, role, everyone, none
+# "user" and "role" require ping_id.
+ping_mode: none
+ping_id:
+
+# GitHub API base URL.
+# Leave this exactly as-is when using github.com.
+# Only change it for GitHub Enterprise Server.
+github_api_base_url: "https://api.github.com"
+
+# Default accent colors for Discord messages.
+# Use a 6-digit hexadecimal color WITHOUT the #.
+commit_accent_color: "5865F2"
+release_accent_color: "FEE75C"
+inactivity_accent_color: "ED4242"
+
+# ============================================================
+# REPOSITORIES
+# ============================================================
 
 repos:
-  # Examples below
-  
-   # Inherits the global role ping
-   - repo: owner/project-one
-     type: normal
-     monitor: releases
 
-  # Overrides the global ping with a specific user
-   - repo: owner/project-two
-     type: normal
-     monitor: releases
-     ping: user
-     ping_id: 222222222222222222
+  # ----------------------------------------------------------
+  # NORMAL REPOSITORY - COMMITS ONLY
+  # ----------------------------------------------------------
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: commits
 
-  # Overrides the global ping with @everyone
-   - repo: owner/project-three
-     type: normal
-     monitor: releases
-     ping: everyone
+  # ----------------------------------------------------------
+  # NORMAL REPOSITORY - RELEASES ONLY
+  # ----------------------------------------------------------
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: releases
 
-  # Disables pinging entirely
-   - repo: owner/project-four
-     type: normal
-     monitor: releases
-     ping: none
+  # ----------------------------------------------------------
+  # NORMAL REPOSITORY - COMMITS + RELEASES
+  # ----------------------------------------------------------
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: both
 
-  # Uses a different role ID but keeps the global role mode
-   - repo: owner/project-five
-     type: normal
-     monitor: releases
-     ping_id: 333333333333333333
+  # ----------------------------------------------------------
+  # FORUM REPOSITORY - COMMITS ONLY
+  # ----------------------------------------------------------
+  # Forum tags are optional. Add up to 5 tag IDs if needed.
+  # - repo: owner/project
+  #   type: forum
+  #   monitor: commits
+  #   tags:
+  #     - 111111111111111111
 
-  # Forum repository using global ping
-   - repo: owner/project-six
-     type: forum
-     monitor: commits
-     tags:
-      - 111111111111111111
+  # ----------------------------------------------------------
+  # FORUM REPOSITORY - RELEASES ONLY
+  # ----------------------------------------------------------
+  # - repo: owner/project
+  #   type: forum
+  #   monitor: releases
+  #   tags:
+  #     - 111111111111111111
 
-  # Forum + user + multiple tags
-   - repo: owner/project-seven
-     type: forum
-     monitor: commits
-     ping: user
-     ping_id: 444444444444444444
-     tags:
-       - 111111111111111111
-       - 222222222222222222
-       - 333333333333333333
+  # ----------------------------------------------------------
+  # FORUM REPOSITORY - COMMITS + RELEASES
+  # ----------------------------------------------------------
+  # - repo: owner/project
+  #   type: forum
+  #   monitor: both
+  #   tags:
+  #     - 111111111111111111
 
-  # Forum + no ping + five tags
-   - repo: owner/project-eight
-     type: forum
-     monitor: commits
-     ping: none
-     tags:
-       - 111111111111111111
-       - 222222222222222222
-       - 333333333333333333
-       - 444444444444444444
-       - 555555555555555555
+  # ==========================================================
+  # OPTIONAL PER-REPOSITORY SETTINGS
+  # ==========================================================
+
+  # ----------------------------------------------------------
+  # PER-REPO WEBHOOK
+  # ----------------------------------------------------------
+  # Normally the global webhook above is used.
+  # Add this only when a repository should post to a different
+  # Discord channel.
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: both
+  #   webhook: "https://discord.com/api/webhooks/OTHER_WEBHOOK"
+
+  # ----------------------------------------------------------
+  # PER-REPO PING
+  # ----------------------------------------------------------
+  # Override the global ping settings for one repository.
+  # Valid ping values: user, role, everyone, none
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: commits
+  #   ping: user
+  #   ping_id: 123456789012345678
+
+  # Role ping:
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: releases
+  #   ping: role
+  #   ping_id: 123456789012345678
+
+  # Everyone ping:
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: both
+  #   ping: everyone
+
+  # Disable pings for this repository:
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: both
+  #   ping: none
+
+  # ----------------------------------------------------------
+  # COMMIT DIGEST MODE
+  # ----------------------------------------------------------
+  # Instead of sending one Discord message for each meaningful
+  # commit found during a run, combine the updates into one digest.
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: commits
+  #   digest: true
+
+  # ----------------------------------------------------------
+  # RELEASE ASSET LINKS
+  # ----------------------------------------------------------
+  # Include downloadable files attached to GitHub releases.
+  # This only affects release monitoring.
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: releases
+  #   include_release_assets: true
+
+  # ----------------------------------------------------------
+  # SHORT RELEASE SUMMARY
+  # ----------------------------------------------------------
+  # Send only the first few lines of long release notes and
+  # include a link to the full release.
+  # summary_lines controls how many lines are included.
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: releases
+  #   short_summary: true
+  #   summary_lines: 8
+
+  # ----------------------------------------------------------
+  # GITHUB ENTERPRISE SERVER
+  # ----------------------------------------------------------
+  # Leave the global github_api_base_url alone for github.com.
+  # Use this only when this particular repository is hosted on
+  # a GitHub Enterprise Server instance.
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: both
+  #   github_api_base_url: "https://github.example.com/api/v3"
+
+  # ----------------------------------------------------------
+  # PER-REPO ACCENT COLOR
+  # ----------------------------------------------------------
+  # Overrides the default accent color for this repository.
+  # Use 6 hexadecimal characters without the #.
+  # - repo: owner/project
+  #   type: normal
+  #   monitor: both
+  #   accent_color: "FF7A00"
+
+  # ----------------------------------------------------------
+  # EVERYTHING TOGETHER
+  # ----------------------------------------------------------
+  # This example demonstrates a Forum repository using both
+  # monitors, its own webhook, its own ping, digest mode, release
+  # assets, short release notes, a custom API URL, a custom color,
+  # and Forum tags.
+  # - repo: owner/project
+  #   type: forum
+  #   monitor: both
+  #   webhook: "https://discord.com/api/webhooks/OTHER_WEBHOOK"
+  #   ping: role
+  #   ping_id: 123456789012345678
+  #   digest: true
+  #   include_release_assets: true
+  #   short_summary: true
+  #   summary_lines: 8
+  #   github_api_base_url: "https://github.example.com/api/v3"
+  #   accent_color: "FF7A00"
+  #   tags:
+  #     - 111111111111111111
+  #     - 222222222222222222
