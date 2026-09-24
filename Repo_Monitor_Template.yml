@@ -112,6 +112,7 @@ jobs:
           MIN_CHUNK = 200  # floor so an unusually long header never stalls chunking
           MAX_COMMITS_PER_RUN = 10  # cap matching commit notifications posted per run
           MAX_RELEASES_PER_RUN = 10
+          MAX_RELEASE_ASSETS_LISTED = 10  # cap assets listed per release; extras get a "view on GitHub" note
           RETRY_ATTEMPTS = 3          # attempts for plain network errors (timeouts, DNS, etc.)
           RETRY_BACKOFF_SECONDS = 3
           RATE_LIMIT_RETRY_ATTEMPTS = 5   # attempts specifically for HTTP 429 (rate limited)
@@ -1303,7 +1304,14 @@ jobs:
                       if name and download_url:
                           asset_lines.append(f"- [{name}]({download_url})")
                   if asset_lines:
-                      notes += "\n\n## Release Assets:\n" + "\n".join(asset_lines)
+                      total_assets = len(asset_lines)
+                      shown_asset_lines = asset_lines[:MAX_RELEASE_ASSETS_LISTED]
+                      notes += "\n\n## Release Assets:\n" + "\n".join(shown_asset_lines)
+                      if total_assets > MAX_RELEASE_ASSETS_LISTED:
+                          notes += (
+                              f"\n\n_Showing {MAX_RELEASE_ASSETS_LISTED} of {total_assets} release assets. "
+                              + (f"[View the GitHub release]({release_url}) for all assets._" if release_url else "View the GitHub release for all assets._")
+                          )
 
               return tag, release_url, author, notes
 
