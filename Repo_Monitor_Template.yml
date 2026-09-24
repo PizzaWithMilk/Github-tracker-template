@@ -339,7 +339,7 @@ jobs:
               """Parse one small YAML-style block per repository."""
               repositories = []
               valid_ping_modes = {"user", "role", "everyone", "none"}
-              valid_monitor_types = {"commits", "releases", "both"}
+              valid_monitor_types = {"commits", "releases"}
               allowed_keys = {
                   "repo",
                   "type",
@@ -433,7 +433,7 @@ jobs:
               for index, config in enumerate(configs, start=1):
                   repo = config.get("repo", "").strip()
                   repo_type = config.get("type", "").strip().lower()
-                  monitor_type = config.get("monitor", "both").strip().lower()
+                  monitor_type = config.get("monitor", "").strip().lower() or "releases"
 
                   ping_override = config.get("ping", "").strip().lower()
                   ping_id_override = config.get("ping_id", "").strip()
@@ -475,7 +475,7 @@ jobs:
                   if monitor_type not in valid_monitor_types:
                       raise ValueError(
                           f"Invalid monitor in repository block {index}: {monitor_type!r}. "
-                          "Use 'commits', 'releases', or 'both'."
+                          "Use 'commits' or 'releases'."
                       )
                   if not re.fullmatch(r"[^/\s]+/[^/\s]+", repo):
                       raise ValueError(
@@ -1615,14 +1615,14 @@ jobs:
 
               had_error = False
               for config in configs:
-                  if config["monitor_type"] in {"commits", "both"}:
+                  if config["monitor_type"] == "commits":
                       try:
                           monitor_commits(config)
                       except Exception as error:
                           had_error = True
                           print(f"Error while monitoring commits for {config['repo']}: {error}")
 
-                  if config["monitor_type"] in {"releases", "both"}:
+                  if config["monitor_type"] == "releases":
                       try:
                           monitor_releases(config)
                       except Exception as error:
