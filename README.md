@@ -38,7 +38,7 @@ Older versions of this project used four separate template files (one each for r
 
 Most Discord channels are regular text channels, so if you're not sure, that's the safer guess.
 
-Because `type` and the destination webhook are both per-repo settings (see [Routing different repos to different channels](#routing-different-repos-to-different-discord-channels)), a single run of this workflow can post some repos' releases to a Forum channel in one server, someone else's commits as a digest in a regular channel in a different server, and so on — all from the one file, checked on the one schedule.
+Because `type` and the destination webhook are both per-repo settings (see [Routing different repos to different channels](#routing-different-repos-to-different-discord-channels)), a single run of this workflow can post some repos' releases to a Forum channel in one server, someone else's commits in a regular channel in a different server, and so on — all from the one file, checked on the one schedule.
 
 ## Quick start (short version)
 
@@ -160,7 +160,6 @@ Every block under `repos:` supports these fields. Only `repo` and `type` are req
 | `webhook` | *(inherits the global `webhook`)* | Overrides which Discord channel this repo posts to — see [Routing different repos to different Discord channels](#routing-different-repos-to-different-discord-channels). |
 | `github_api_base_url` | *(inherits the global value)* | Per-repo override, for a repo hosted on a different GitHub instance than the rest of your list. |
 | `accent_color` | *(inherits `commit_accent_color`/`release_accent_color`)* | Overrides the embed accent color just for this repo. |
-| `digest` | `false` | Commit tracking only. If `true`, batches all new commits for this repo into a single summary message instead of one message per commit — see [Commit digest mode](#commit-digest-mode). |
 | `include_release_assets` | `true` | Release tracking only. Lists the release's downloadable files as links under "Release Assets." |
 | `short_summary` | `false` | Release tracking only. Shortens long release notes instead of posting them in full — see [Release notes options](#release-notes-options). |
 | `summary_lines` | `8` | Release tracking only, used with `short_summary`. How many lines of the release notes to keep. |
@@ -181,12 +180,10 @@ repos:
   - repo: torvalds/linux
     type: normal
     monitor: releases           # only releases are tracked for this repo
-    digest: false
 
   - repo: someuser/some-other-repo
     type: normal
     monitor: commits            # only commits are tracked for this repo
-    digest: true                # ...and they're batched into one digest message per run
 
   - repo: someorg/chatty-repo
     type: forum
@@ -280,23 +277,7 @@ Commit tracking doesn't just repost every single commit message verbatim — it 
 
 When something *is* reported, the Discord message shows a **Change Log** broken into `### Added`, `### Removed`, `### Changed`, and `### Fixed` sections (whichever apply), plus a **Version** field pulled from the commit message if one is mentioned (falls back to "Unknown" if it isn't).
 
-This filtering only affects *individual* commit notifications and [digest](#commit-digest-mode) summaries — it has no effect on release tracking, which always uses a release's actual, unedited release notes.
-
-### Commit digest mode
-
-By default, each new commit that clears the filtering above gets its own separate Discord message (or its own Forum thread, on a `type: forum` repo). If you'd rather get one combined summary instead — useful for a repo that commits often — set `digest: true` on that repo:
-
-```yaml
-repos:
-  - repo: someuser/chatty-repo
-    type: normal
-    monitor: commits
-    digest: true
-```
-
-With digest mode on, all of the new, meaningful commits found in that run are posted as a single message: a count of how many meaningful updates were found, how many were skipped as noise, and then one line per commit (short SHA, author, and a short summary of what it changed) linking back to GitHub. If the digest would be too long for a single Discord message, it's cut off with a note rather than split across several messages.
-
-Digest mode also looks back further than non-digest tracking when it's catching up — up to about 1,000 recent commits, instead of the usual 100 — since its whole point is to summarize a backlog efficiently rather than post one message per commit.
+This filtering only affects individual commit notifications — it has no effect on release tracking, which always uses a release's actual, unedited release notes.
 
 ### Release notes options
 
@@ -309,9 +290,9 @@ Only actual GitHub *releases* are reported — draft releases and prereleases ar
 
 ### Catching up on multiple items
 
-If this monitor is ever offline for a while (say, GitHub has an outage, or you paused the workflow), it doesn't just tell you about the single newest thing when it comes back — it catches up and tells you about *everything* it missed for that repo, oldest first, up to 10 items in one run (this cap doesn't apply to [digest mode](#commit-digest-mode), which handles overflow differently). This applies independently to each repo — and to each update type (commits vs. releases) on that repo — so one repo catching up on a large backlog doesn't affect the cap for any other repo.
+If this monitor is ever offline for a while (say, GitHub has an outage, or you paused the workflow), it doesn't just tell you about the single newest thing when it comes back — it catches up and tells you about *everything* it missed for that repo, oldest first, up to 10 items in one run. This applies independently to each repo — and to each update type (commits vs. releases) on that repo — so one repo catching up on a large backlog doesn't affect the cap for any other repo.
 
-If more than 10 things happened while it was away (in non-digest mode), the oldest ones beyond that limit are skipped (with a note saying how many were skipped) rather than flooding your channel with a wall of messages — you'll still always be told about the current latest one.
+If more than 10 things happened while it was away, the oldest ones beyond that limit are skipped (with a note saying how many were skipped) rather than flooding your channel with a wall of messages — you'll still always be told about the current latest one.
 
 In one unusual edge case — extremely heavy activity, or a force-push that rewrites a repo's history — the last thing it remembers might no longer be found anywhere in the recent history at all. When that happens, it can't figure out exactly what was missed, so it just reports the single latest item along with a note explaining that it couldn't reconstruct the full gap, rather than guessing.
 
@@ -339,9 +320,9 @@ Each notification is shown with a colored accent stripe: blurple for commits and
 
 Everything described above still applies to a `type: forum` repo — the one difference is **where things get posted**: instead of dropping a message into a shared, ongoing channel, **each new release or commit gets posted as its own new Forum post (a "thread")**, using that repo's own effective webhook.
 
-- Each thread's title looks like `{Project Name} Updated! — {tag}` for releases, `{Project Name} Updated! — Version {version}` for an individual commit notification (or "Unknown" in place of the version if none could be found in the commit message), or `{Project Name} - {N} New Commits` for a [digest](#commit-digest-mode) post. (Forum post titles have a 100-character limit in Discord, so an unusually long one gets shortened automatically.)
+- Each thread's title looks like `{Project Name} Updated! — {tag}` for releases, or `{Project Name} Updated! — Version {version}` for an individual commit notification (or "Unknown" in place of the version if none could be found in the commit message). (Forum post titles have a 100-character limit in Discord, so an unusually long one gets shortened automatically.)
 - If one release or commit's notes are too long to fit in a single message, the extra "(continued)" messages are posted as replies *inside that same thread* — they don't create new, separate posts.
-- If several new releases or commits show up in one run, **each one gets its own separate thread** — three new releases means three new Forum posts, not one post containing three messages. As above, only the first (oldest) one in that batch gets a ping. (Digest posts are the exception — a commit digest is always one single post covering every commit in that batch.)
+- If several new releases or commits show up in one run, **each one gets its own separate thread** — three new releases means three new Forum posts, not one post containing three messages. As above, only the first (oldest) one in that batch gets a ping.
 
 **Forum tags (optional).** You can have a repo's posts automatically tagged with one or more of your Forum channel's tags, using a `tags:` list in that repo's block in `config/repos.yml`:
 
