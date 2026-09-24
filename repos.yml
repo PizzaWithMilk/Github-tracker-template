@@ -139,16 +139,6 @@ repos:
   #   ping: none
 
   # ----------------------------------------------------------
-  # COMMIT DIGEST MODE
-  # ----------------------------------------------------------
-  # Instead of sending one Discord message for each meaningful
-  # commit found during a run, combine the updates into one digest.
-  # - repo: owner/project
-  #   type: normal
-  #   monitor: commits
-  #   digest: true
-
-  # ----------------------------------------------------------
   # RELEASE ASSET LINKS
   # ----------------------------------------------------------
   # Include downloadable files attached to GitHub releases.
@@ -195,7 +185,7 @@ repos:
   # EVERYTHING TOGETHER
   # ----------------------------------------------------------
   # This example demonstrates a Forum repository using both
-  # monitors, its own webhook, its own ping, digest mode, release
+  # monitors, its own webhook, its own ping, release
   # assets, short release notes, a custom API URL, a custom color,
   # and Forum tags.
   # - repo: owner/project
@@ -204,7 +194,6 @@ repos:
   #   webhook: "https://discord.com/api/webhooks/OTHER_WEBHOOK"
   #   ping: role
   #   ping_id: 123456789012345678
-  #   digest: true
   #   include_release_assets: true
   #   short_summary: true
   #   summary_lines: 8
