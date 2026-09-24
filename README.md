@@ -283,7 +283,7 @@ This filtering only affects individual commit notifications — it has no effect
 Two settings, both release-tracking-only, control how much of a release's notes actually get posted:
 
 - **`short_summary: true`** shortens the release notes to `summary_lines` lines (8 by default) instead of posting them in full, and adds a "View full release" link at the end pointing back to GitHub. Useful for projects that write very long release notes.
-- **`include_release_assets: true`** (the default) lists that release's downloadable files as a "Release Assets" section with a direct download link for each one. Set it to `false` if you'd rather not see that list.
+- **`include_release_assets: true`** (the default) lists that release's downloadable files as a "Release Assets" section with a direct download link for each one. Set it to `false` if you'd rather not see that list. Only the first 10 assets are listed — if a release has more than that, the section ends with a note like `Showing 10 of 14 release assets. View the GitHub release for all assets.` rather than omitting the rest without saying so.
 
 Only actual GitHub *releases* are reported — draft releases and prereleases are skipped, the same as GitHub's own "latest release" definition on a repo's main page.
 
