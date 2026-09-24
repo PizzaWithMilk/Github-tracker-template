@@ -93,7 +93,6 @@ jobs:
           CURRENT_RELEASE_ASSETS = True
           CURRENT_SHORT_SUMMARY = False
           CURRENT_SUMMARY_LINES = 8
-          CURRENT_DIGEST = False
           MONITOR_KIND = ""
           CURRENT_REPO_TYPE = "normal"
           INACTIVITY_FORUM = False
@@ -111,8 +110,7 @@ jobs:
           CONTINUATION_FIXED_COMPONENTS = 1  # container
           CONTINUATION_LABEL_OVERHEAD = 80  # room for "(continued) - Part X/Y:" labels
           MIN_CHUNK = 200  # floor so an unusually long header never stalls chunking
-          MAX_COMMITS_PER_RUN = 10  # cap matching commit notifications when digest mode is disabled
-          MAX_COMMIT_PAGES = 10  # digest mode can page through up to 1,000 recent commits to find the saved state
+          MAX_COMMITS_PER_RUN = 10  # cap matching commit notifications posted per run
           MAX_RELEASES_PER_RUN = 10
           RETRY_ATTEMPTS = 3          # attempts for plain network errors (timeouts, DNS, etc.)
           RETRY_BACKOFF_SECONDS = 3
@@ -351,7 +349,6 @@ jobs:
                   "webhook",
                   "github_api_base_url",
                   "accent_color",
-                  "digest",
                   "include_release_assets",
                   "short_summary",
                   "summary_lines",
@@ -452,7 +449,6 @@ jobs:
                   accent_color = parse_color_value(accent_raw) if accent_raw else None
 
                   tags = [str(tag).strip() for tag in config.get("tags", []) if str(tag).strip()]
-                  digest = parse_bool_value(config.get("digest", "false"), False)
                   include_release_assets = parse_bool_value(
                       config.get("include_release_assets", "true"), True
                   )
@@ -525,7 +521,6 @@ jobs:
                           "webhook": webhook,
                           "github_api_base_url": api_base,
                           "accent_color": accent_color,
-                          "digest": digest,
                           "include_release_assets": include_release_assets,
                           "short_summary": short_summary,
                           "summary_lines": summary_lines,
@@ -556,7 +551,7 @@ jobs:
               """Set repository-specific API, state, webhook, and message styling."""
               global REPO, PROJECT_NAME, API_URL, STATE, CURRENT_WEBHOOK, CURRENT_API_BASE_URL
               global CURRENT_GITHUB_WEB_BASE_URL, CURRENT_ACCENT_COLOR, CURRENT_RELEASE_ASSETS
-              global CURRENT_SHORT_SUMMARY, CURRENT_SUMMARY_LINES, CURRENT_DIGEST, THREAD_STATE
+              global CURRENT_SHORT_SUMMARY, CURRENT_SUMMARY_LINES, THREAD_STATE
               global MONITOR_KIND, CURRENT_REPO_TYPE, ISSUE_URL_PATTERN
 
               REPO = config["repo"]
@@ -568,7 +563,6 @@ jobs:
               CURRENT_RELEASE_ASSETS = config["include_release_assets"]
               CURRENT_SHORT_SUMMARY = config["short_summary"]
               CURRENT_SUMMARY_LINES = config["summary_lines"]
-              CURRENT_DIGEST = config["digest"]
               MONITOR_KIND = monitor_kind
 
               if monitor_kind == "commit":
@@ -623,31 +617,20 @@ jobs:
                           raise last_error
 
 
-          def get_recent_commits(max_pages=1):
-              """Fetch recent commits, optionally paging through history for digest catch-up."""
-              commits = []
-              for page in range(1, max_pages + 1):
-                  separator = "&" if "?" in API_URL else "?"
-                  page_url = f"{API_URL}{separator}page={page}"
+          def get_recent_commits():
+              """Fetch the most recent page of commits."""
+              def build_request():
+                  headers = {
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "GitHub-Discord-Monitor/1.0",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  }
+                  if GITHUB_TOKEN:
+                      headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+                  return urllib.request.Request(API_URL, headers=headers)
 
-                  def build_request():
-                      headers = {
-                          "Accept": "application/vnd.github+json",
-                          "User-Agent": "GitHub-Discord-Monitor/1.0",
-                          "X-GitHub-Api-Version": "2022-11-28",
-                      }
-                      if GITHUB_TOKEN:
-                          headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-                      return urllib.request.Request(page_url, headers=headers)
-
-                  body = fetch_with_retry(build_request)
-                  batch = json.loads(body)
-                  if not batch:
-                      break
-                  commits.extend(batch)
-                  if len(batch) < 100:
-                      break
-              return commits
+              body = fetch_with_retry(build_request)
+              return json.loads(body)
 
 
           def build_ping(ping_mode, ping_id):
@@ -1276,50 +1259,6 @@ jobs:
 
               clear_thread_progress()
 
-          def send_commit_digest(commits, filtered_count, note=None, applied_tags=None, ping_mode=None, ping_id=None):
-              ping_text, ping_mentions = build_ping(ping_mode, ping_id)
-              title = f"## {PROJECT_NAME} - {len(commits)} New Updates"
-
-              lines = []
-              if note:
-                  lines.append(note)
-                  lines.append("")
-              lines.append(
-                  f"**{len(commits)} meaningful update(s) detected.**"
-                  + (f" {filtered_count} commit(s) were ignored as non-update noise." if filtered_count else "")
-              )
-              lines.append("")
-
-              for commit in commits:
-                  short_sha, commit_url, author_name, version, message = commit_meta(commit)
-                  subject = message.splitlines()[0].strip() if message.strip() else "(No commit message.)"
-                  subject = subject[:500] + ("..." if len(subject) > 500 else "")
-                  lines.append(f"- [`{short_sha}`]({commit_url}) **{author_name}** - {subject}")
-
-              text = "\n".join(lines)
-              if len(text) > 3500:
-                  text = text[:3350].rstrip() + "\n\n_Additional commits omitted from this summary._"
-
-              components = []
-              if ping_text:
-                  components.append({"type": 10, "content": ping_text})
-              container = [
-                  {"type": 10, "content": title},
-                  {"type": 14, "spacing": 1},
-                  {"type": 10, "content": text},
-              ]
-              components.append(make_container(container, CURRENT_ACCENT_COLOR))
-
-              if CURRENT_REPO_TYPE != "forum":
-                  send_discord(components, ping_mentions)
-                  return
-
-              forum_title = make_forum_title(f"{PROJECT_NAME} - {len(commits)} New Commits")
-              response = send_discord(components, ping_mentions, thread_name=forum_title, applied_tags=applied_tags)
-              thread_id = response.get("channel_id")
-              if thread_id:
-                  clear_thread_progress()
-
           def get_recent_releases():
               def build_request():
                   headers = {
@@ -1585,8 +1524,7 @@ jobs:
               if applied_tag_ids:
                   print(f"Forum tags configured for {REPO}: {', '.join(applied_tag_ids)}")
 
-              max_pages = MAX_COMMIT_PAGES if CURRENT_DIGEST else 1
-              commits = get_recent_commits(max_pages=max_pages)
+              commits = get_recent_commits()
               if not commits:
                   print(f"No commits found for {REPO}.")
                   return ping_sent
@@ -1633,19 +1571,6 @@ jobs:
                   STATE.write_text(latest_sha + "\n")
                   print(f"No commits matched the configured filters for {REPO}; advanced state past {len(raw_new_commits)} new commit(s).")
                   return ping_sent
-
-              if CURRENT_DIGEST:
-                  send_commit_digest(
-                      eligible_commits,
-                      filtered_count,
-                      note=note,
-                      applied_tags=applied_tag_ids,
-                      ping_mode=config["ping_mode"],
-                      ping_id=config["ping_id"],
-                  )
-                  STATE.write_text(latest_sha + "\n")
-                  print(f"Commit digest sent for {REPO}; state saved at {latest_sha[:7]}.")
-                  return True
 
               overflow = 0
               if len(eligible_commits) > MAX_COMMITS_PER_RUN:
