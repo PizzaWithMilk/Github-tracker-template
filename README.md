@@ -154,7 +154,7 @@ Every block under `repos:` supports these fields. Only `repo` and `type` are req
 |---|---|---|
 | `repo` | *(required)* | `OWNER/REPO`. Must be the first field in the block. |
 | `type` | *(required)* | `normal` or `forum` — which kind of Discord channel this repo's notifications go to. |
-| `monitor` | `both` | `commits`, `releases`, or `both` — which kind(s) of updates to track for this repo. |
+| `monitor` | `releases` | `commits`, `releases`, or `both` — which kind(s) of updates to track for this repo. |
 | `ping` | *(inherits `ping_mode`)* | Overrides `ping_mode` just for this repo. |
 | `ping_id` | *(inherits `ping_id`)* | Overrides `ping_id` just for this repo. |
 | `webhook` | *(inherits the global `webhook`)* | Overrides which Discord channel this repo posts to — see [Routing different repos to different Discord channels](#routing-different-repos-to-different-discord-channels). |
@@ -174,12 +174,11 @@ webhook: "YOUR_DEFAULT_DISCORD_WEBHOOK_URL_HERE"
 
 repos:
   - repo: ChrisTitusTech/winutil
-    type: normal
-    monitor: both               # the default - tracks both releases and commits
+    type: normal                # monitor not set - uses the default (releases)
 
   - repo: torvalds/linux
     type: normal
-    monitor: releases           # only releases are tracked for this repo
+    monitor: releases           # explicit here, but same as the default above
 
   - repo: someuser/some-other-repo
     type: normal
