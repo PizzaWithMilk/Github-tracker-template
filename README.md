@@ -44,10 +44,10 @@ Because `type` and the destination webhook are both per-repo settings (see [Rout
 
 If you've done this kind of thing before, here's the condensed version — the full walkthrough with screen-by-screen detail is right after this:
 
-1. Change the `name:` field and the `concurrency: group:` value at the top of the file if you're running more than one copy of this workflow in the same repo, so they don't collide.
+1. Create the workflow under `.github/workflows/` and keep its `name:` and concurrency groups unique if you run more than one copy in the same repository.
 2. Create a `config/repos.yml` file listing the repo(s) you want to watch, a Discord webhook URL, your default ping settings, and (optionally) per-repo overrides — see [Configuring repos.yml](#configuring-reposyml).
-3. Fill in the workflow's own `env:` block: `CONFIG_FILE` (only if you put `repos.yml` somewhere other than the default path), `STATE_DIR`, and `NOTIFY_ON_INITIAL_RUN` as needed.
-4. Commit both files to the repo — the workflow to `.github/workflows/`, and `repos.yml` wherever `CONFIG_FILE` points (`config/repos.yml` by default).
+3. Keep the workflow's `CONFIG_FILE`, `STATE_DIR`, and `NOTIFY_ON_INITIAL_RUN` settings as needed. If you change the config path away from `config/repos.yml`, update the validation job's `CONFIG_FILE` too.
+4. Commit the workflow and `repos.yml` to the repo.
 
 No GitHub secret needs to be created — the Discord webhook URL goes directly into `repos.yml` (see [Step 4](#step-4-add-your-discord-webhook) for what that means for privacy).
 
@@ -95,8 +95,8 @@ Further down in the file, under `jobs: monitor: env:`, you'll find a small block
 
 | Setting | What it means |
 |---|---|
-| `CONFIG_FILE` | Path to the `repos.yml` file you created in Step 2, relative to the root of this repo. The default, `config/repos.yml`, is fine as long as you put the file there — change this only if you saved it somewhere else, or you're running a second copy of this workflow that should read a *different* config file. |
-| `STATE_DIR` | The folder (inside this repo) where the workflow keeps its bookmark files — one small file per repo/update-type combination listed in `repos.yml`, named automatically, so you never have to think about individual filenames. The default, `.github/monitor-state`, is fine for almost everyone; change it only if you specifically want these files stored somewhere else. |
+| `CONFIG_FILE` | Path to `repos.yml`, relative to the repository root. The monitor job defaults to `config/repos.yml`. If you change it, change the validation job's `CONFIG_FILE` in the `validate` job to the same path so validation checks the same file. |
+| `STATE_DIR` | The folder where the workflow keeps its bookmark, failure, and multi-part delivery resume files. The default, `.github/monitor-state`, is fine for most setups. |
 | `NOTIFY_ON_INITIAL_RUN` | `"true"` (the default) or `"false"`. Controls what happens the first time this monitor checks a given repo for a given update type — see [First run behavior](#first-run-behavior) below. |
 
 ### Step 4: Add your Discord webhook
@@ -128,6 +128,18 @@ To check it's working right away, without waiting:
 
 A run with a green checkmark ✅ means everything worked. A red ✕ means something failed — see [Troubleshooting](#troubleshooting).
 
+## Config validation
+
+The same workflow also contains a separate `validate` job so bad config changes can be caught before you rely on the monitor.
+
+- A **push** or **pull request** that changes `config/repos.yml` or the workflow file runs the `validate` job.
+- A **scheduled run** or **manual `Run workflow`** runs the `monitor` job instead.
+- Validation does not contact Discord, does not query the monitored repositories, and does not modify monitor state.
+- The validation job uses its own concurrency group (`repo-monitor-validation`) and can cancel an older validation run when a newer config change arrives.
+- The monitor job uses a separate `repo-monitor` concurrency group and does **not** cancel an active monitor run.
+
+When validation fails, read the `validate` job log. The parser reports the config problem and the line it found it on. Fix the config, commit the change, and GitHub will start a new validation run automatically.
+
 ## Configuring repos.yml
 
 `config/repos.yml` has a small set of top-level (global) settings, followed by a `repos:` list where each block can override most of those settings just for that one repo.
@@ -148,13 +160,13 @@ Colors can be written as `#RRGGBB`, `RRGGBB`, `0xRRGGBB`, or a plain decimal num
 
 ### Per-repo settings
 
-Every block under `repos:` supports these fields. Only `repo` and `type` are required; everything else falls back to a sensible default or to the matching global setting.
+Every block under `repos:` supports these fields. Only `repo` and `type` are required; `monitor` defaults to `both`, and the other fields fall back to a sensible default or to the matching global setting.
 
 | Field | Default | What it does |
 |---|---|---|
 | `repo` | *(required)* | `OWNER/REPO`. Must be the first field in the block. |
 | `type` | *(required)* | `normal` or `forum` — which kind of Discord channel this repo's notifications go to. |
-| `monitor` | `releases` | `commits`, `releases`, or `both` — which kind(s) of updates to track for this repo. |
+| `monitor` | `both` | `commits`, `releases`, or `both` — which kind(s) of updates to track for this repo. |
 | `ping` | *(inherits `ping_mode`)* | Overrides `ping_mode` just for this repo. |
 | `ping_id` | *(inherits `ping_id`)* | Overrides `ping_id` just for this repo. |
 | `webhook` | *(inherits the global `webhook`)* | Overrides which Discord channel this repo posts to — see [Routing different repos to different Discord channels](#routing-different-repos-to-different-discord-channels). |
@@ -165,6 +177,8 @@ Every block under `repos:` supports these fields. Only `repo` and `type` are req
 | `summary_lines` | `8` | Release tracking only, used with `short_summary`. How many lines of the release notes to keep. |
 | `tags` | *(none)* | Forum channels only. A list of Forum tag IDs to apply to this repo's posts — see [Forum channel behavior](#forum-channel-behavior). |
 
+There is **no `digest` setting in this version**. Adding `digest:` to a repository block is treated as an unknown setting and will fail config validation.
+
 ### Putting it together
 
 ```yaml
@@ -174,11 +188,11 @@ webhook: "YOUR_DEFAULT_DISCORD_WEBHOOK_URL_HERE"
 
 repos:
   - repo: ChrisTitusTech/winutil
-    type: normal                # monitor not set - uses the default (releases)
+    type: normal                # monitor not set - uses the default (commits + releases)
 
   - repo: torvalds/linux
     type: normal
-    monitor: releases           # explicit here, but same as the default above
+    monitor: releases           # release monitoring only
 
   - repo: someuser/some-other-repo
     type: normal
@@ -263,7 +277,7 @@ Every single time it runs, here's exactly what happens, for each update type (co
 3. If nothing's changed since last time, it does nothing else for that repo/update-type and moves on. **This is the normal result for almost every single run** — most of the time, nothing new has happened, and that's expected, not a sign anything is broken.
 4. If something *is* new, it posts about it in Discord, then updates that bookmark file so it doesn't mention that same thing again next time.
 
-One more detail: if, for some reason, a run is somehow still going when the next scheduled run starts (this shouldn't normally happen — a run usually finishes in well under a minute), GitHub will cancel the older one rather than letting two copies run at once and potentially conflict with each other. If that cancellation happens to land in the middle of a run, whichever items it hadn't finished saving state for yet may get reported again on the next run — a rare edge case, but worth knowing about if you're watching an unusually large number of repos.
+One more detail: scheduled/manual monitoring runs use a concurrency group with `cancel-in-progress: false`, so an active monitor run is allowed to finish and save its state instead of being canceled by a newer monitoring run. Push/PR validation runs use their own separate concurrency group, so validation does not queue behind the monitor.
 
 ### Which commits actually get reported
 
@@ -336,27 +350,34 @@ repos:
 
 Discord allows at most 5 tags per post. This is genuinely the fiddly part: unlike user/role IDs, Discord doesn't give you a simple right-click **Copy ID** for Forum tags. The most reliable way to find one is to open your server in Discord's web app (in a browser, not the desktop app) → the Forum channel's settings → **Tags**, then open your browser's Developer Tools (F12) → **Network** tab, and look through the channel data Discord loads there — it lists each tag's name right next to its numeric ID. This whole feature is entirely optional; leave `tags:` out and nothing gets tagged.
 
-**About the thread-resume files, and why you usually won't see them in your repo — this is expected, not a problem:**
+**About the multi-part delivery resume files, and why you usually won't see them in your repo:**
 
-Alongside each repo's regular bookmark file, `STATE_DIR` also holds a small, temporary resume file for each Forum repo/update-type in `config/repos.yml` (named automatically) — a safety net, not a permanent record, used only to recover if something goes wrong halfway through posting a long item.
+Alongside each repo's regular bookmark file, `STATE_DIR` can hold a small temporary resume file for a long Discord delivery — one for normal-channel multi-part messages and one for Forum threads.
 
-- While a single release or commit is in the middle of being posted (say, its notes need 3 separate messages), this file briefly holds a note saying "I'm partway through posting this one — here's exactly which thread, and where I left off."
-- The moment that item finishes posting completely — even if it only ever needed one message — this file is automatically deleted again, before the run ends.
-- It is only left behind, and only shows up as a real file in your repo, if a run genuinely fails or errors out *in the middle* of posting a long item (for example, Discord has a temporary outage right as it's sending message 2 of 3). In that case, the next run reads this file and continues posting into the *same* thread exactly where it left off — instead of starting a confusing duplicate thread for the same release.
+- The file records the repo, update type, item, part position, thread/message context, and a content fingerprint.
+- If a run stops after part 2 of a 4-part notification, the next run can continue from the saved position instead of starting the whole notification again.
+- If the saved content no longer matches the current content, the workflow refuses to mix the old and new parts; for Forum posts it discards the stale resume state and starts a fresh Forum post.
+- If a saved Forum thread was deleted and Discord returns 404 while continuing it, the workflow creates a fresh Forum post and continues there.
+- Once an item finishes completely, its temporary delivery state is removed.
 
-**In short: if `STATE_DIR` only contains the regular bookmark files, that's the normal, healthy state.** You'd only expect to see one of these resume files sitting there if a previous run failed partway through, and even then, it should disappear again as soon as a later run finishes posting that item successfully.
-
-The [Inactivity reminder](#inactivity-reminder) below posts as its own brand-new Forum thread when it fires, if applicable — it never needs a resume file, since it always fits in a single message.
+So seeing only the ordinary bookmark files in `STATE_DIR` is the normal, healthy state. Resume files mainly appear after a delivery was interrupted partway through.
 
 ### Reliability
 
-In plain terms: this workflow is built to quietly recover from small, temporary problems on its own, rather than immediately giving up and failing.
+The monitor is designed to recover from common temporary failures, while making persistent problems visible instead of silently looping forever.
 
-- If a network request times out or briefly fails to connect, it automatically tries again a few times (up to 3 attempts, waiting a little longer between each one) before giving up.
-- Both GitHub and Discord can sometimes respond with "you're sending requests too fast, slow down" (this is called a rate limit, HTTP error code 429) — this can happen if a single run needs to send several messages in a row, especially when watching several repos at once. When that happens, the workflow automatically waits the amount of time it's told to (capped at 15 seconds per wait, so it never stalls indefinitely), then tries again, up to 5 times, instead of just failing.
-- To help avoid triggering that "too fast" response in the first place, it also deliberately waits at least half a second between every single Discord message it sends — including between messages for entirely different repos in the same run.
-- Any *other* kind of error (like an invalid webhook URL, or a repo that doesn't exist) is treated as a real problem, not a temporary glitch — it's **not** retried, and the run fails immediately so you'll see it clearly in the Actions tab rather than it silently retrying forever. When watching multiple repos, one repo hitting this kind of error doesn't stop the others from being checked — but it does mean that run's overall result still shows as failed, so you notice.
-- If you run more than one of these monitor workflows in the same repo (see the FAQ), it's normal for two of them to occasionally try to save their state at almost the same moment. Saving state automatically retries a few times if that happens, so a timing collision like that doesn't fail the run or lose either workflow's progress.
+- Plain network errors such as timeouts and connection failures are retried up to 3 times with a short backoff.
+- HTTP `429` rate-limit responses are retried up to 5 times, using `Retry-After` when Discord or GitHub supplies it, with each individual wait capped at 15 seconds.
+- GitHub's **primary REST API rate limit** is handled separately. When GitHub reports `403` or `429` together with `X-RateLimit-Remaining: 0`, the workflow reads `X-RateLimit-Reset`. If the reset is only a short time away, it waits up to 30 seconds for the reset. Otherwise it stops checking more repositories for that run rather than wasting the rest of the run on requests that cannot succeed.
+- GitHub and Discord HTTP `5xx` responses are retried a small number of times, and HTTP `408` is retried as a transient request failure.
+- Discord sends are throttled with at least a half-second between messages to reduce the chance of hitting Discord's rate limits.
+- GitHub permanent errors such as `404`, `401`, or unauthorized `403` are treated as persistent configuration/access problems rather than endlessly retried.
+- Discord webhook errors `401`, `403`, and `404` are also treated as permanent. A deleted Forum thread is handled specially: the workflow creates a replacement Forum post and continues the interrupted delivery.
+- Permanent failures alert immediately, once per persistent issue. Other transient failures are tracked per repository/update type and trigger a failure alert after 3 consecutive failed runs. Primary GitHub rate-limit exhaustion is tracked separately and alerts after 3 consecutive affected runs.
+- Failure-alert state is stored in `STATE_DIR`, so the workflow does not forget an ongoing problem between runs. A successful recovery clears the corresponding failure state.
+- Monitor runs serialize through the `repo-monitor` concurrency group with `cancel-in-progress: false`, so an active monitoring run is allowed to finish rather than being canceled by a newer scheduled run.
+- Validation runs use a separate `repo-monitor-validation` concurrency group and are limited to config-checking events.
+
 
 ## Links in release notes / commit messages
 
@@ -368,7 +389,7 @@ This is unrelated to releases or commits — it's a safety net for a separate Gi
 
 This matters most if you followed the suggestion in Step 1 to put this workflow in its own small, dedicated repo rather than one that already gets commits for other reasons. A repo used for nothing but hosting this workflow only ever gets a new commit when the workflow itself finds something new to report — so if every project you're monitoring goes quiet for a couple of months, that hosting repo could genuinely rack up 60 days of silence and get shut off without you ever being told.
 
-To guard against that, every single run also quietly checks one extra thing: "has it been at least 59 days since the last commit to this repo?" If so — and only if you haven't already been sent this particular reminder — it posts a one-time Discord message titled **"Workflow Re-enable Reminder"**, pinging whoever you've configured via the top-level `ping_mode`/`ping_id` defaults in `config/repos.yml`.
+To guard against that, every scheduled/manual monitoring run also quietly checks one extra thing: "has it been at least 59 days since the last commit to this repo?" If so — and only if you haven't already been sent this particular reminder — it posts a one-time Discord message titled **"Workflow Re-enable Reminder"**, pinging whoever you've configured via the top-level `ping_mode`/`ping_id` defaults in `config/repos.yml`.
 
 This reminder always uses your **top-level `webhook:` default** specifically — not any per-repo webhook override. **If you don't set a top-level `webhook:` in `repos.yml` at all (relying only on per-repo overrides), the inactivity reminder is silently skipped**, since there's no obvious channel it should go to. If you want this safety net, make sure `webhook:` is set at the top level even if every one of your repos also sets its own override.
 
@@ -385,9 +406,13 @@ A few more details worth knowing:
 
 ## Troubleshooting
 
+**My `validate` job is skipped.** That's normal on a scheduled run or a manual `Run workflow`. The `validate` job only runs for `push` and `pull_request` events that touch `config/repos.yml` or the workflow file. Scheduled/manual runs use the `monitor` job instead. If you changed `CONFIG_FILE` away from `config/repos.yml`, make sure the validation job's own `CONFIG_FILE` setting points to the same file.
+
 **The whole run fails immediately, before checking anything, and the log mentions something like `Invalid repository entry`, `Missing ping_id`, `Invalid type`, `Invalid monitor`, or `has no webhook`.** Something in `config/repos.yml` isn't formatted correctly — a missing `/` in a repo name, a `ping:` value that isn't `user`/`role`/`everyone`/`none`, a `user`/`role` ping with no `ping_id` set, a repo block missing its required `type:`, a `monitor:` value that isn't `commits`/`releases`/`both`, a repo with no webhook available to it (neither its own nor a top-level default), or a setting misplaced outside the `repos:` section, for example. The error message names the exact line number to check. A mistake in the config file blocks the *entire* run, since the workflow can't tell what to check yet. Fix the line and it'll pick back up on the next scheduled run (or click **Run workflow** to retry immediately).
 
 **The log says `Config file not found`.** The workflow's `CONFIG_FILE` setting (Step 3) points somewhere that doesn't actually have a `repos.yml` there — usually because the file was never committed, or it's saved at a different path than `CONFIG_FILE` says. Double-check the file exists in the repo at that exact path.
+
+**I got a Repo Monitor failure alert.** Permanent GitHub/Discord access errors are alerted immediately; transient repository failures are alerted after 3 consecutive failed runs. Check the exact error in the Actions log first. A successful run clears the corresponding failure state, so a one-time blip should not keep alerting forever.
 
 **One repo in my config keeps failing, but the others post fine.** That's expected — see [Configuring repos.yml](#configuring-reposyml). The run still shows as failed overall so you notice, but the log will tell you exactly which repo via a line like `Error while monitoring OWNER/REPO: ...`, and every other repo in your config is still checked and posted about normally.
 
@@ -432,6 +457,6 @@ A few more details worth knowing:
 
 **Will this notify me about every single commit?** No — see [Which commits actually get reported](#which-commits-actually-get-reported). Bot commits, merge commits, and commits with no describable user-facing change are filtered out automatically.
 
-**Will I hit GitHub's rate limits by running this?** No, in virtually all normal cases. GitHub limits how many API requests you can make without logging in to 60 per hour, but this workflow automatically authenticates every request using the token GitHub provides for free, which raises that limit dramatically. Watching several repos in your config means one extra API call per repo/update-type per run, which barely moves the needle — you'd need to be watching an unusually large number of repos before this would ever become a concern.
+**Will I hit GitHub's rate limits by running this?** Normal use is designed to stay comfortably within GitHub's authenticated API limits, and the workflow explicitly handles both ordinary `429` responses and primary rate-limit exhaustion. If the primary limit is actually exhausted, the workflow will wait briefly when the reset is imminent or skip the remaining repositories for that run instead of hammering the API.
 
 **Why did I get a Discord message titled "Workflow Re-enable Reminder"?** That's expected — not an error, and nothing is broken. It means the repo hosting this workflow hasn't had a commit in about 59 days, which is right before GitHub's own 60-day cutoff for automatically disabling scheduled workflows. See [Inactivity reminder](#inactivity-reminder) above for the full explanation; the short version is: check the **Actions** tab in a day or so, and if the workflow has been disabled, click **Re-enable workflow**.
