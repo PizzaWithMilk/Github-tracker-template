@@ -5,7 +5,6 @@
 # See README.md for setup instructions.
 # ============================================================================
 # Configuration, styling, webhooks, and monitored repositories are read from config/repos.yml.
-# This same workflow also validates config/repos.yml on every relevant push and pull request.
 
 name: Repo Monitor   
 
@@ -13,251 +12,18 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
-  # The same workflow doubles as a lightweight config validator on pushes and pull requests.
-  # Validation-only runs never contact Discord and never modify monitor state.
-  push:
-    paths:
-      - "config/repos.yml"
-      - ".github/workflows/Repo_Monitor_Template.yml"
-  pull_request:
-    paths:
-      - "config/repos.yml"
-      - ".github/workflows/Repo_Monitor_Template.yml"
 
 permissions:
   contents: write
 
+concurrency:
+  group: repo-monitor   
+  cancel-in-progress: true
+
 jobs:
-  validate:
-    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: repo-monitor-validation
-      cancel-in-progress: true
-    env:
-      CONFIG_FILE: "config/repos.yml"
-    steps:
-      - name: Checkout config
-        uses: actions/checkout@v4
-
-      - name: Validate config
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python3 <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          CONFIG_FILE = Path(os.environ.get("CONFIG_FILE", "config/repos.yml"))
-          text = CONFIG_FILE.read_text(encoding="utf-8")
-          if not text.strip():
-              raise ValueError("Config file is empty.")
-
-          def strip_config_value(raw_value):
-              """Strip a trailing comment while safely handling quoted values."""
-              value = str(raw_value).strip()
-              if value[:1] in ('"', "'"):
-                  quote = value[0]
-                  closing = None
-                  escaped = False
-                  for index in range(1, len(value)):
-                      char = value[index]
-                      if escaped:
-                          escaped = False
-                          continue
-                      if char == "\\":
-                          escaped = True
-                          continue
-                      if char == quote:
-                          closing = index
-                          break
-                  if closing is None:
-                      raise ValueError("Unterminated quoted config value.")
-                  trailing = value[closing + 1:].strip()
-                  if trailing and not trailing.startswith("#"):
-                      raise ValueError(
-                          f"Unexpected text after quoted config value: {trailing!r}. "
-                          "Only a trailing # comment is allowed."
-                      )
-                  return value[1:closing]
-              comment_match = re.search(r"\s#", value)
-              if comment_match:
-                  value = value[:comment_match.start()]
-              return value.strip()
-
-          def parse_list_value(raw_value):
-              value = str(raw_value).strip()
-              if not value:
-                  return []
-              if value.startswith("[") or value.endswith("]"):
-                  if not (value.startswith("[") and value.endswith("]")):
-                      raise ValueError(f"Invalid inline list value: {value!r}.")
-                  value = value[1:-1].strip()
-                  if not value:
-                      return []
-              return [part.strip().strip('"').strip("'") for part in value.split(",") if part.strip()]
-
-          allowed_top_level_keys = {
-              "ping_mode",
-              "ping_id",
-              "webhook",
-              "github_api_base_url",
-              "commit_accent_color",
-              "release_accent_color",
-              "inactivity_accent_color",
-              "repos",
-          }
-          valid_repo_types = {"normal", "forum"}
-          valid_monitor_types = {"commits", "releases", "both"}
-          valid_ping_modes = {"user", "role", "everyone", "none"}
-
-          top_level = {}
-          seen_top_level_keys = set()
-          repo_lines = []
-          in_repos = False
-          repos_indent = None
-
-          for line_number, raw_line in enumerate(text.splitlines(), start=1):
-              if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-                  if in_repos:
-                      repo_lines.append(raw_line)
-                  continue
-
-              indent = len(raw_line) - len(raw_line.lstrip())
-              stripped = raw_line.strip()
-
-              if indent == 0:
-                  in_repos = False
-                  repos_indent = None
-                  if ":" not in stripped:
-                      raise ValueError(f"Invalid config on line {line_number}: {stripped!r}. Expected 'key: value'.")
-                  key, value = stripped.split(":", 1)
-                  key = key.strip()
-                  value = strip_config_value(value)
-                  if key not in allowed_top_level_keys:
-                      raise ValueError(f"Unknown config setting on line {line_number}: {key!r}.")
-                  if key in seen_top_level_keys:
-                      raise ValueError(f"Duplicate top-level config setting on line {line_number}: {key!r}.")
-                  seen_top_level_keys.add(key)
-                  if key == "repos":
-                      if value:
-                          raise ValueError(f"Invalid 'repos' setting on line {line_number}: the value must contain the repository blocks below it.")
-                      in_repos = True
-                      top_level[key] = True
-                  else:
-                      top_level[key] = value
-                  continue
-
-              if not in_repos:
-                  raise ValueError(f"Invalid config on line {line_number}: indented settings must be inside the 'repos:' section.")
-              if repos_indent is None:
-                  repos_indent = indent
-              if indent < repos_indent:
-                  raise ValueError(f"Invalid config indentation on line {line_number}: repository settings must stay inside 'repos:'.")
-              repo_lines.append(raw_line[repos_indent:])
-
-          if not top_level.get("repos"):
-              raise ValueError("Config is missing the 'repos:' section.")
-
-          current = None
-          configs = []
-          current_list_key = None
-          seen_repo_names = set()
-
-          for line_number, line in enumerate(repo_lines, start=1):
-              if not line.strip() or line.lstrip().startswith("#"):
-                  continue
-              indent = len(line) - len(line.lstrip())
-              stripped_line = line.strip()
-              if indent == 0:
-                  if current is not None:
-                      configs.append(current)
-                      current = None
-                      current_list_key = None
-                  if stripped_line.startswith("- "):
-                      current = {"repo": ""}
-                      current_list_key = None
-                      maybe_repo = stripped_line[2:].strip()
-                      if not maybe_repo:
-                          raise ValueError(f"Invalid repository entry on line {line_number}: expected '- repo: OWNER/REPO'.")
-                      if ":" not in maybe_repo:
-                          raise ValueError(f"Invalid repository entry on line {line_number}: {maybe_repo!r}. Expected 'repo: OWNER/REPO'.")
-                      key, value = maybe_repo.split(":", 1)
-                      key = key.strip()
-                      value = strip_config_value(value)
-                      if key != "repo":
-                          raise ValueError(f"Invalid repository entry on line {line_number}: the first field in each repository block must be 'repo'.")
-                      current[key] = value
-                  else:
-                      raise ValueError(f"Invalid repo config on line {line_number}: repository blocks must begin with '- repo:'.")
-                  continue
-
-              if current is None:
-                  raise ValueError(f"Invalid repository configuration on line {line_number}: repository settings must be inside a '- repo:' block.")
-
-              if stripped_line.startswith("- ") and indent > 0:
-                  if current_list_key != "tags":
-                      raise ValueError(f"Invalid list item on line {line_number}: list items are only valid for 'tags'.")
-                  current["tags"].append(strip_config_value(stripped_line[2:]).strip('"').strip("'"))
-                  continue
-
-              if ":" not in stripped_line:
-                  raise ValueError(f"Invalid repository setting on line {line_number}: {stripped_line!r}. Expected 'key: value'.")
-
-              key, value = stripped_line.split(":", 1)
-              key = key.strip()
-              value = strip_config_value(value)
-              if key not in {"repo", "type", "monitor", "ping", "ping_id", "webhook", "github_api_base_url", "accent_color", "tags", "include_release_assets", "short_summary", "summary_lines"}:
-                  raise ValueError(f"Unknown repository setting on line {line_number}: {key!r}.")
-              if key in current:
-                  raise ValueError(f"Duplicate repository setting on line {line_number}: {key!r}.")
-              if key == "tags":
-                  current[key] = parse_list_value(value)
-                  current_list_key = key
-              else:
-                  current[key] = value
-                  current_list_key = None
-
-          if current is not None:
-              configs.append(current)
-
-          for index, config in enumerate(configs, start=1):
-              repo = str(config.get("repo", "")).strip()
-              repo_type = str(config.get("type", "normal")).strip().lower()
-              monitor_type = str(config.get("monitor", "")).strip().lower() or "both"
-              if not repo:
-                  raise ValueError(f"Repository block {index} is missing 'repo: OWNER/REPO'.")
-              if repo_type not in valid_repo_types:
-                  raise ValueError(f"Invalid type in repository block {index}: {repo_type!r}. Use 'normal' or 'forum'.")
-              if monitor_type not in valid_monitor_types:
-                  raise ValueError(f"Invalid monitor in repository block {index}: {monitor_type!r}. Use 'commits', 'releases', or 'both'.")
-              match = re.fullmatch(r"([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})", repo)
-              if not match:
-                  raise ValueError(f"Invalid repo in repository block {index}: {repo!r}. Expected OWNER/REPO.")
-              if repo.casefold() in seen_repo_names:
-                  raise ValueError(f"Duplicate repository in configuration: {repo!r}.")
-              seen_repo_names.add(repo.casefold())
-              tags = config.get("tags", [])
-              if len(set(tags)) != len(tags):
-                  raise ValueError(f"Duplicate Forum tag IDs in repository block {index}.")
-              if len(tags) > 5:
-                  raise ValueError(f"Too many Forum tag IDs in repository block {index} ({len(tags)}). Discord allows at most 5.")
-              for tag_id in tags:
-                  if not re.fullmatch(r"\d+", tag_id):
-                      raise ValueError(f"Invalid Forum tag ID in repository block {index}: {tag_id!r}. Forum tag IDs must be numeric.")
-
-          print(f"Config validation passed: {len(configs)} repository block(s) are valid.")
-          PY
-
   monitor:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    concurrency:
-      group: repo-monitor
-      cancel-in-progress: false
     env:
       CONFIG_FILE: "config/repos.yml"              # Shared repository and ping configuration.
       STATE_DIR: ".github/monitor-state"           # <-- CHANGE THIS if you want the monitor state stored somewhere else.
@@ -269,7 +35,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Calculate 59-day inactivity reminder state
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         id: inactivity
         shell: bash
         run: |                                  # GitHub's 60-day scheduled-workflow inactivity rule is based on activity in the repository that contains this workflow.
@@ -292,14 +57,13 @@ jobs:
           echo "cache_key=github-workflow-inactivity-${workflow_key}-${last_commit_sha}-${cycle}" >> "$GITHUB_OUTPUT"
 
       - name: Restore 59-day inactivity reminder state
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         id: inactivity-cache
         uses: actions/cache/restore@v4
         with:
           path: .github/.workflow-inactivity-reminder.marker
           key: ${{ steps.inactivity.outputs.cache_key }}
 
-      - name: Validate config / check for new commits and releases
+      - name: Check for new commits and releases
         id: monitor
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -308,16 +72,15 @@ jobs:
           REMINDER_CACHE_MARKER: .github/.workflow-inactivity-reminder.marker
         run: |
           python3 <<'PY'
-          import hashlib
           import json
           import os
           import re
           import time
           import urllib.request
           import urllib.error
-          from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+          from urllib.parse import urlparse, urlunparse
           from pathlib import Path
-          
+
           CONFIG_FILE = Path(os.environ.get("CONFIG_FILE", "config/repos.yml"))
           STATE_DIR = Path(os.environ.get("STATE_DIR", ".github/monitor-state"))
           REPO = ""
@@ -333,14 +96,13 @@ jobs:
           MONITOR_KIND = ""
           CURRENT_REPO_TYPE = "normal"
           INACTIVITY_FORUM = False
-          
+
           GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
           NOTIFY_ON_INITIAL_RUN = os.environ.get("NOTIFY_ON_INITIAL_RUN", "true").strip().lower() not in ("false", "0", "no")
-          
+
           STATE = None
-          
+
           THREAD_STATE = None  # set per-repo by configure_repository(), like STATE
-          DELIVERY_STATE = None  # set per-repo for normal-channel multi-part delivery recovery
           # Stay comfortably under Discord's per-message limits (~4000 total text chars, 40 components).
           TOTAL_MESSAGE_BUDGET = 3800
           MAX_TOTAL_COMPONENTS = 36
@@ -348,7 +110,7 @@ jobs:
           CONTINUATION_FIXED_COMPONENTS = 1  # container
           CONTINUATION_LABEL_OVERHEAD = 80  # room for "(continued) - Part X/Y:" labels
           MIN_CHUNK = 200  # floor so an unusually long header never stalls chunking
-          MAX_COMMITS_PER_RUN = 10  # cap matching commit notifications posted individually per run
+          MAX_COMMITS_PER_RUN = 10  # cap matching commit notifications posted per run
           MAX_RELEASES_PER_RUN = 10
           MAX_RELEASE_ASSETS_LISTED = 10  # cap assets listed per release; extras get a "view on GitHub" note
           RETRY_ATTEMPTS = 3          # attempts for plain network errors (timeouts, DNS, etc.)
@@ -356,81 +118,31 @@ jobs:
           RATE_LIMIT_RETRY_ATTEMPTS = 5   # attempts specifically for HTTP 429 (rate limited)
           RATE_LIMIT_MAX_WAIT_SECONDS = 15  # cap per-wait even if Retry-After asks for longer
           DISCORD_SEND_DELAY_SECONDS = 0.5  # minimum gap between consecutive Discord messages
-          FAILURE_ALERT_THRESHOLD = 3       # transient failures must persist this many runs before alerting
-          RATE_LIMIT_ALERT_THRESHOLD = 3    # primary GitHub rate-limit failures must persist this many runs before alerting
-          GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS = 30  # wait briefly if the primary rate-limit reset is imminent
           _last_discord_send_at = {"t": None}  # tracks the last Discord send time for throttling
-          
-          
-          class GitHubPermanentError(RuntimeError):
-              """A GitHub API error that will not be fixed by retrying this run."""
-          
-              def __init__(self, status, message):
-                  super().__init__(message)
-                  self.status = status
-          
-          
-          class GitHubRateLimitError(RuntimeError):
-              """GitHub's primary REST API rate limit is exhausted."""
-          
-              def __init__(self, reset_epoch=None, message="GitHub API primary rate limit exhausted"):
-                  super().__init__(message)
-                  self.reset_epoch = reset_epoch
-          
-          
-          class DiscordPermanentError(RuntimeError):
-              """A Discord webhook error that is not expected to recover without configuration changes."""
-          
-              def __init__(self, status, message):
-                  super().__init__(message)
-                  self.status = status
-                  self.service = "discord"
-          
-          
-          class DiscordThreadGoneError(RuntimeError):
-              """The saved Discord Forum thread no longer exists."""
-          
-              def __init__(self, status, message):
-                  super().__init__(message)
-                  self.status = status
-                  self.service = "discord"
-          
-          
-          
-          
+
+
+
+
           def strip_config_value(raw_value):
-              """Strip a trailing comment while safely handling quoted values."""
-              value = str(raw_value).strip()
+              """Strip a trailing '# comment' from a config value. A value that
+              starts with a quote is taken verbatim up to its matching closing
+              quote, so a quoted value is never truncated by a '#' inside it.
+              A '#' only starts a comment when preceded by whitespace, so an
+              unquoted value that legitimately begins with '#' (e.g. a hex
+              color like #5865F2) is preserved instead of being wiped out."""
+              value = raw_value.strip()
               if value[:1] in ('"', "'"):
                   quote = value[0]
-                  closing = None
-                  escaped = False
-                  for index in range(1, len(value)):
-                      char = value[index]
-                      if escaped:
-                          escaped = False
-                          continue
-                      if char == "\\":
-                          escaped = True
-                          continue
-                      if char == quote:
-                          closing = index
-                          break
-                  if closing is None:
-                      raise ValueError("Unterminated quoted config value.")
-                  trailing = value[closing + 1:].strip()
-                  if trailing and not trailing.startswith("#"):
-                      raise ValueError(
-                          f"Unexpected text after quoted config value: {trailing!r}. "
-                          "Only a trailing # comment is allowed."
-                      )
-                  return value[1:closing]
+                  closing = value.find(quote, 1)
+                  if closing != -1:
+                      return value[1:closing]
+                  return value[1:].strip()
               comment_match = re.search(r"\s#", value)
               if comment_match:
                   value = value[:comment_match.start()]
               return value.strip()
-          
-          
+
+
           def parse_bool_value(raw_value, default=False):
               value = str(raw_value).strip().lower()
               if value == "":
@@ -440,8 +152,8 @@ jobs:
               if value in {"false", "no", "off", "0"}:
                   return False
               raise ValueError(f"Invalid boolean config value: {raw_value!r}. Use true or false.")
-          
-          
+
+
           def parse_color_value(raw_value, default=None):
               value = strip_config_value(str(raw_value))
               if not value:
@@ -465,8 +177,8 @@ jobs:
               if not 0 <= number <= 0xFFFFFF:
                   raise ValueError(f"Accent color {value!r} is outside the RGB range 0x000000-0xFFFFFF.")
               return number
-          
-          
+
+
           def normalize_api_base_url(raw_value):
               value = strip_config_value(str(raw_value)) or "https://api.github.com"
               value = value.rstrip("/")
@@ -479,8 +191,8 @@ jobs:
               if parsed.query or parsed.fragment:
                   raise ValueError("github_api_base_url must not contain a query string or fragment.")
               return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
-          
-          
+
+
           def derive_web_base_url(api_base_url):
               parsed = urlparse(api_base_url.rstrip("/"))
               host = parsed.netloc
@@ -492,50 +204,30 @@ jobs:
               elif host.lower().startswith("api.") and path == "":
                   host = host[4:]
               return urlunparse((parsed.scheme, host, path, "", "", "")).rstrip("/")
-          
-          
+
+
           def parse_list_value(raw_lines_or_value):
               if isinstance(raw_lines_or_value, list):
                   return [str(value).strip() for value in raw_lines_or_value if str(value).strip()]
               value = str(raw_lines_or_value).strip()
               if not value:
                   return []
-              if value.startswith("[") or value.endswith("]"):
-                  if not (value.startswith("[") and value.endswith("]")):
-                      raise ValueError(f"Invalid inline list value: {value!r}.")
-                  value = value[1:-1].strip()
-                  if not value:
-                      return []
               return [part.strip().strip('"').strip("'") for part in value.split(",") if part.strip()]
-          
-          
+
+
           def make_container(children, accent_color=None):
               container = {"type": 17, "components": children}
               if accent_color is not None:
                   container["accent_color"] = accent_color
               return container
-          
-          
-          def normalize_webhook_url(raw_value, field_label="webhook"):
-              value = strip_config_value(str(raw_value))
-              if not value:
-                  return ""
-              parsed = urlparse(value)
-              if parsed.scheme != "https" or not parsed.netloc:
-                  raise ValueError(
-                      f"Invalid {field_label} URL {value!r}. Use the complete HTTPS Discord webhook URL."
-                  )
-              if parsed.fragment:
-                  raise ValueError(f"Invalid {field_label} URL {value!r}: URL fragments are not supported.")
-              return value.rstrip("/")
-          
+
           def load_config(path):
               """Load shared defaults and the repository section from config/repos.yml."""
               if not path.is_file():
                   raise FileNotFoundError(
                       f"Config file not found: {path}. Create config/repos.yml with optional global webhook, ping settings, and repos."
                   )
-          
+
               text = path.read_text(encoding="utf-8")
               allowed_top_level_keys = {
                   "ping_mode",
@@ -548,20 +240,19 @@ jobs:
                   "repos",
               }
               top_level = {}
-              seen_top_level_keys = set()
               repo_lines = []
               in_repos = False
               repos_indent = None
-          
+
               for line_number, raw_line in enumerate(text.splitlines(), start=1):
                   if not raw_line.strip() or raw_line.lstrip().startswith("#"):
                       if in_repos:
                           repo_lines.append(raw_line)
                       continue
-          
+
                   indent = len(raw_line) - len(raw_line.lstrip())
                   stripped = raw_line.strip()
-          
+
                   if indent == 0:
                       in_repos = False
                       repos_indent = None
@@ -577,11 +268,6 @@ jobs:
                               f"Unknown config setting on line {line_number}: {key!r}. "
                               f"Use: {', '.join(sorted(allowed_top_level_keys))}."
                           )
-                      if key in seen_top_level_keys:
-                          raise ValueError(
-                              f"Duplicate top-level config setting on line {line_number}: {key!r}."
-                          )
-                      seen_top_level_keys.add(key)
                       if key == "repos":
                           if value:
                               raise ValueError(
@@ -592,12 +278,12 @@ jobs:
                       else:
                           top_level[key] = value
                       continue
-          
+
                   if not in_repos:
                       raise ValueError(
                           f"Invalid config on line {line_number}: indented settings must be inside the 'repos:' section."
                       )
-          
+
                   if repos_indent is None:
                       repos_indent = indent
                   if indent < repos_indent:
@@ -605,14 +291,14 @@ jobs:
                           f"Invalid config indentation on line {line_number}: repository settings must stay inside 'repos:'."
                       )
                   repo_lines.append(raw_line[repos_indent:])
-          
+
               if not top_level.get("repos"):
                   raise ValueError("Config is missing the 'repos:' section.")
-          
+
               defaults = {
                   "ping_mode": str(top_level.get("ping_mode", "user")).strip().lower(),
                   "ping_id": str(top_level.get("ping_id", "")).strip(),
-                  "webhook": normalize_webhook_url(top_level.get("webhook", ""), "global webhook"),
+                  "webhook": str(top_level.get("webhook", "")).strip(),
                   "github_api_base_url": normalize_api_base_url(
                       top_level.get("github_api_base_url", "https://api.github.com")
                   ),
@@ -627,9 +313,9 @@ jobs:
                   ),
               }
               return defaults, "\n".join(repo_lines).strip()
-          
+
           DEFAULTS, REPOS_RAW = load_config(CONFIG_FILE)
-          
+
           VALID_PING_MODES = {"user", "role", "everyone", "none"}
           if DEFAULTS["ping_mode"] not in VALID_PING_MODES:
               raise ValueError(
@@ -640,11 +326,7 @@ jobs:
                   f"ping_mode is {DEFAULTS['ping_mode']!r} but ping_id is empty. "
                   "Set ping_id in config/repos.yml, or change ping_mode to everyone/none."
               )
-          if DEFAULTS["ping_id"] and not re.fullmatch(r"\d+", DEFAULTS["ping_id"]):
-              raise ValueError(
-                  f"Invalid global ping_id {DEFAULTS['ping_id']!r}. Discord user and role IDs must contain digits only."
-              )
-          
+
           DEFAULT_PING_MODE = DEFAULTS["ping_mode"]
           DEFAULT_PING_ID = DEFAULTS["ping_id"]
           DEFAULT_WEBHOOK = DEFAULTS["webhook"]
@@ -652,13 +334,13 @@ jobs:
           DEFAULT_COMMIT_ACCENT_COLOR = DEFAULTS["commit_accent_color"]
           DEFAULT_RELEASE_ACCENT_COLOR = DEFAULTS["release_accent_color"]
           DEFAULT_INACTIVITY_ACCENT_COLOR = DEFAULTS["inactivity_accent_color"]
-          
-          
+
+
           def parse_repositories(raw):
               """Parse one small YAML-style block per repository."""
               repositories = []
               valid_ping_modes = {"user", "role", "everyone", "none"}
-              valid_monitor_types = {"commits", "releases", "both"}
+              valid_monitor_types = {"commits", "releases"}
               allowed_keys = {
                   "repo",
                   "type",
@@ -677,22 +359,19 @@ jobs:
               configs = []
               current = None
               current_list_key = None
-              current_seen_keys = set()
-              seen_repo_names = set()
-          
+
               for line_number, raw_line in enumerate(raw.splitlines(), start=1):
                   if not raw_line.strip() or raw_line.lstrip().startswith("#"):
                       continue
-          
+
                   indent = len(raw_line) - len(raw_line.lstrip())
                   line = raw_line.strip()
-          
+
                   if line.startswith("- ") and indent == 0:
                       if current is not None:
                           configs.append(current)
                       current = {}
                       current_list_key = None
-                      current_seen_keys = {"repo"}
                       entry = line[2:].strip()
                       if ":" not in entry:
                           raise ValueError(
@@ -709,13 +388,13 @@ jobs:
                           )
                       current[key] = value
                       continue
-          
+
                   if current is None:
                       raise ValueError(
                           f"Invalid repository configuration on line {line_number}: "
                           "repository settings must be inside a '- repo:' block."
                       )
-          
+
                   if line.startswith("- ") and indent > 0:
                       if current_list_key not in list_keys or current_list_key not in current:
                           raise ValueError(
@@ -725,12 +404,12 @@ jobs:
                           strip_config_value(line[2:]).strip('"').strip("'")
                       )
                       continue
-          
+
                   if ":" not in line:
                       raise ValueError(
                           f"Invalid repository setting on line {line_number}: {line!r}. Expected 'key: value'."
                       )
-          
+
                   key, value = line.split(":", 1)
                   key = key.strip()
                   value = strip_config_value(value)
@@ -739,11 +418,6 @@ jobs:
                           f"Unknown repository setting on line {line_number}: {key!r}. "
                           f"Use: {', '.join(sorted(allowed_keys))}."
                       )
-                  if key in current_seen_keys:
-                      raise ValueError(
-                          f"Duplicate repository setting on line {line_number}: {key!r}."
-                      )
-                  current_seen_keys.add(key)
                   if key in list_keys:
                       if key not in current:
                           current[key] = []
@@ -753,39 +427,34 @@ jobs:
                   else:
                       current[key] = value
                       current_list_key = None
-          
+
               if current is not None:
                   configs.append(current)
-          
+
               for index, config in enumerate(configs, start=1):
                   repo = config.get("repo", "").strip()
-                  repo_type = config.get("type", "normal").strip().lower()
-                  monitor_type = config.get("monitor", "").strip().lower() or "both"
-          
+                  repo_type = config.get("type", "").strip().lower()
+                  monitor_type = config.get("monitor", "").strip().lower() or "releases"
+
                   ping_override = config.get("ping", "").strip().lower()
                   ping_id_override = config.get("ping_id", "").strip()
                   ping_mode = ping_override or DEFAULTS["ping_mode"]
-                  if ping_id_override:
-                      ping_id = ping_id_override
-                  elif ping_mode in {"user", "role"}:
-                      ping_id = DEFAULTS["ping_id"]
-                  else:
-                      ping_id = ""
+                  ping_id = ping_id_override or (DEFAULTS["ping_id"] if not ping_override else "")
 
                   api_base = normalize_api_base_url(
                       config.get("github_api_base_url", "").strip() or DEFAULTS["github_api_base_url"]
                   )
                   webhook = config.get("webhook", "").strip() or DEFAULTS["webhook"]
-          
+
                   accent_raw = config.get("accent_color", "").strip()
                   accent_color = parse_color_value(accent_raw) if accent_raw else None
-          
+
                   tags = [str(tag).strip() for tag in config.get("tags", []) if str(tag).strip()]
                   include_release_assets = parse_bool_value(
                       config.get("include_release_assets", "true"), True
                   )
                   short_summary = parse_bool_value(config.get("short_summary", "false"), False)
-          
+
                   summary_lines_raw = config.get("summary_lines", "8").strip()
                   try:
                       summary_lines = int(summary_lines_raw)
@@ -795,7 +464,7 @@ jobs:
                       ) from error
                   if summary_lines < 1:
                       raise ValueError(f"summary_lines must be at least 1 in repository block {index}.")
-          
+
                   if not repo:
                       raise ValueError(
                           f"Repository block {index} is missing 'repo: OWNER/REPO'."
@@ -807,20 +476,12 @@ jobs:
                   if monitor_type not in valid_monitor_types:
                       raise ValueError(
                           f"Invalid monitor in repository block {index}: {monitor_type!r}. "
-                          "Use 'commits', 'releases', or 'both'."
+                          "Use 'commits' or 'releases'."
                       )
-                  repo_match = re.fullmatch(r"([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})", repo)
-                  if not repo_match:
+                  if not re.fullmatch(r"[^/\s]+/[^/\s]+", repo):
                       raise ValueError(
-                          f"Invalid repo in repository block {index}: {repo!r}. Expected OWNER/REPO using a valid GitHub owner and repository name."
+                          f"Invalid repo in repository block {index}: {repo!r}. Expected OWNER/REPO."
                       )
-                  repo_identity = repo.casefold()
-                  if repo_identity in seen_repo_names:
-                      raise ValueError(
-                          f"Duplicate repository in configuration: {repo!r}. A repository may only appear once because its state is shared by repo and monitor kind."
-                      )
-                  seen_repo_names.add(repo_identity)
-                  webhook = normalize_webhook_url(webhook, f"webhook for repository {repo}")
                   if not webhook:
                       raise ValueError(
                           f"Repository block {index} has no webhook. Set the global 'webhook' or add 'webhook:' to this repository."
@@ -833,14 +494,6 @@ jobs:
                   if ping_mode in {"user", "role"} and not ping_id:
                       raise ValueError(
                           f"Missing ping_id in repository block {index}: ping mode {ping_mode!r} requires a user or role ID."
-                      )
-                  if ping_id and not re.fullmatch(r"\d+", ping_id):
-                      raise ValueError(
-                          f"Invalid ping_id in repository block {index}: {ping_id!r}. Discord user and role IDs must contain digits only."
-                      )
-                  if len(set(tags)) != len(tags):
-                      raise ValueError(
-                          f"Duplicate Forum tag IDs in repository block {index}. Each tag ID may only be listed once."
                       )
                   if len(tags) > 5:
                       raise ValueError(
@@ -857,7 +510,7 @@ jobs:
                           f"'ping_id' was set in repository block {index} but the effective ping mode is {ping_mode!r}. "
                           "Add 'ping: user' or 'ping: role', or remove ping_id."
                       )
-          
+
                   repositories.append(
                       {
                           "repo": repo,
@@ -875,244 +528,33 @@ jobs:
                           "tags": tags,
                       }
                   )
-          
+
               if not repositories:
                   raise ValueError(
                       "The 'repos:' section is empty. Add at least one '- repo: OWNER/REPO' block to config/repos.yml."
                   )
-          
+
               return repositories
-          
+
           def state_path_for_repo(repo):
               """Return a filesystem-safe state filename unique to the monitored repo and monitor kind."""
               key = re.sub(r"[^A-Za-z0-9._-]+", "_", repo.replace("/", "__"))
               return STATE_DIR / f"{key}_{MONITOR_KIND}.txt"
-          
-          
+
+
           def thread_state_path_for_repo(repo):
               """Return a filesystem-safe Forum-thread resume-state filename unique to the monitored repo and monitor kind."""
               key = re.sub(r"[^A-Za-z0-9._-]+", "_", repo.replace("/", "__"))
               return STATE_DIR / f"{key}_{MONITOR_KIND}_thread.json"
-          
-          
-          def delivery_state_path_for_repo(repo, kind=None):
-              """Return normal-channel multi-part delivery resume state for the monitored repo and kind."""
-              key = re.sub(r"[^A-Za-z0-9._-]+", "_", repo.replace("/", "__"))
-              resolved_kind = kind or MONITOR_KIND
-              return STATE_DIR / f"{key}_{resolved_kind}_delivery.json"
-          
-          
-          def failure_state_path_for_repo(repo, kind):
-              """Return durable transient failure-alert state for one repository/monitor kind."""
-              key = re.sub(r"[^A-Za-z0-9._-]+", "_", repo.replace("/", "__"))
-              return STATE_DIR / f"{key}_{kind}_failure.json"
-          
-          
-          def permanent_failure_state_path_for_repo(repo):
-              """Return durable one-time permanent-failure state shared by all monitor kinds for a repository."""
-              key = re.sub(r"[^A-Za-z0-9._-]+", "_", repo.replace("/", "__"))
-              return STATE_DIR / f"{key}_permanent_failure.json"
-          
-          
-          GLOBAL_RATE_LIMIT_STATE = STATE_DIR / "_github_primary_rate_limit_failure.json"
-          
-          
-          def _load_json_state(path):
-              if not path.exists():
-                  return {}
-              try:
-                  data = json.loads(path.read_text(encoding="utf-8"))
-                  return data if isinstance(data, dict) else {}
-              except (OSError, json.JSONDecodeError) as error:
-                  print(f"Could not read failure state {path}: {error}")
-                  return {}
-          
-          
-          def _save_json_state(path, data):
-              path.parent.mkdir(parents=True, exist_ok=True)
-              temp_path = path.with_name(path.name + ".tmp")
-              temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-              temp_path.replace(path)
-          
-          
-          def _clear_json_state(path):
-              try:
-                  path.unlink()
-              except FileNotFoundError:
-                  pass
-          
-          
-          def _safe_failed_kinds(state):
-              raw = state.get("failed_kinds", [])
-              if not isinstance(raw, (list, tuple, set)):
-                  return set()
-              return {str(kind) for kind in raw if str(kind) in {"commits", "releases"}}
-          
-          
-          def _safe_alert_sent(state):
-              return state.get("alert_sent") is True
-          
-          
-          def _safe_consecutive(state):
-              try:
-                  value = int(state.get("consecutive", 0))
-              except (TypeError, ValueError):
-                  return 0
-              return max(value, 0)
-          
-          
-          def _format_reset_time(reset_epoch):
-              if not reset_epoch:
-                  return "unknown"
-              try:
-                  return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(float(reset_epoch)))
-              except (TypeError, ValueError, OverflowError):
-                  return "unknown"
-          
-          
-          def send_failure_alert(config, message, ping=True):
-              """Send one durable failure heads-up using the affected repository's webhook."""
-              monitor_kind = "commit" if config.get("monitor_type") in {"commit", "commits"} else "release"
-              configure_repository(config, monitor_kind)
-              ping_text, ping_mentions = build_ping(config["ping_mode"], config["ping_id"]) if ping else ("", {})
-              components = []
-              if ping_text:
-                  components.append({"type": 10, "content": ping_text})
-              components.append(make_container([
-                  {"type": 10, "content": f"## Repo Monitor Alert: {config['project_name']}"},
-                  {"type": 14, "spacing": 1},
-                  {"type": 10, "content": message},
-              ], DEFAULT_RELEASE_ACCENT_COLOR))
-              if config["repo_type"] == "forum":
-                  response = send_discord(
-                      components,
-                      ping_mentions,
-                      thread_name=make_forum_title(f"Repo Monitor Alert - {config['project_name']}"),
-                      applied_tags=config["tags"],
-                  )
-                  return response
-              return send_discord(components, ping_mentions)
-          
-          
-          def record_repo_failure(config, error, permanent=False):
-              """Track failures and alert once per persistent issue. Permanent failures alert immediately."""
-              kind = config["monitor_type"]
-              error_text = str(error)
-          
-              if permanent:
-                  path = permanent_failure_state_path_for_repo(config["repo"])
-                  state = _load_json_state(path)
-                  failed_kinds = _safe_failed_kinds(state)
-                  failed_kinds.add(kind)
-                  service = getattr(error, "service", "GitHub")
-                  status = getattr(error, "status", None)
-                  issue_fingerprint = f"{service}:{status}"
-                  if state.get("issue_fingerprint") != issue_fingerprint:
-                      state["alert_sent"] = False
-                  state.update({
-                      "failed_kinds": sorted(failed_kinds),
-                      "last_error": error_text,
-                      "last_status": status,
-                      "issue_fingerprint": issue_fingerprint,
-                  })
-          
-                  # Permanent failures are immediate, and this state is shared across commit/release
-                  # monitoring so a repo with monitor=both does not get duplicate 404/401/403 alerts.
-                  if not bool(state.get("alert_sent", False)):
-                      reason = (
-                          f"{service} returned a permanent HTTP error while monitoring `{config['repo']}`: {error_text}. "
-                          "This usually means the repository, credentials, webhook, or target is no longer valid. "
-                          "Update the config or credentials if needed."
-                      )
-                      try:
-                          send_failure_alert(config, reason)
-                          state["alert_sent"] = True
-                          print(f"Sent one-time permanent failure alert for {config['repo']}.")
-                      except Exception as alert_error:
-                          print(f"Could not send permanent failure alert for {config['repo']}: {alert_error}")
-          
-                  _save_json_state(path, state)
-                  return
-          
-              path = failure_state_path_for_repo(config["repo"], kind)
-              state = _load_json_state(path)
-              consecutive = _safe_consecutive(state) + 1
-              alert_sent = _safe_alert_sent(state)
-              state.update({"consecutive": consecutive, "alert_sent": alert_sent, "last_error": error_text})
-          
-              if not alert_sent and consecutive >= FAILURE_ALERT_THRESHOLD:
-                  reason = (
-                      f"`{config['repo']}` has failed monitoring {consecutive} consecutive runs. "
-                      f"The latest error was: {error_text}. "
-                      "The monitor will keep retrying."
-                  )
-                  try:
-                      send_failure_alert(config, reason)
-                      state["alert_sent"] = True
-                      print(f"Sent one-time transient failure alert for {config['repo']} ({kind}).")
-                  except Exception as alert_error:
-                      print(f"Could not send transient failure alert for {config['repo']}: {alert_error}")
-          
-              _save_json_state(path, state)
-          
-          
-          def record_repo_success(config):
-              """Reset the monitor-kind transient state and clear permanent state only after all failed kinds recover."""
-              transient_path = failure_state_path_for_repo(config["repo"], config["monitor_type"])
-              if transient_path.exists():
-                  _clear_json_state(transient_path)
-          
-              permanent_path = permanent_failure_state_path_for_repo(config["repo"])
-              permanent_state = _load_json_state(permanent_path)
-              if permanent_state:
-                  failed_kinds = _safe_failed_kinds(permanent_state)
-                  failed_kinds.discard(config["monitor_type"])
-                  if failed_kinds:
-                      permanent_state["failed_kinds"] = sorted(failed_kinds)
-                      _save_json_state(permanent_path, permanent_state)
-                  else:
-                      _clear_json_state(permanent_path)
-          
-          
-          def record_global_rate_limit_failure(config, reset_epoch):
-              """Track the workflow-wide GitHub primary rate limit and send one alert after persistence."""
-              state = _load_json_state(GLOBAL_RATE_LIMIT_STATE)
-              consecutive = _safe_consecutive(state) + 1
-              alert_sent = _safe_alert_sent(state)
-              reset_text = _format_reset_time(reset_epoch)
-              state.update({
-                  "consecutive": consecutive,
-                  "alert_sent": alert_sent,
-                  "last_reset_epoch": reset_epoch,
-              })
-              if not alert_sent and consecutive >= RATE_LIMIT_ALERT_THRESHOLD:
-                  message = (
-                      "GitHub's primary REST API rate limit has been exhausted for this monitor. "
-                      f"It has affected {consecutive} consecutive workflow runs. "
-                      f"GitHub reports the rate-limit reset at {reset_text}. "
-                      "The monitor skipped the remaining repositories in the affected run and will retry on the next scheduled run."
-                  )
-                  try:
-                      send_failure_alert(config, message)
-                      state["alert_sent"] = True
-                      print("Sent one-time primary GitHub rate-limit alert.")
-                  except Exception as alert_error:
-                      print(f"Could not send primary GitHub rate-limit alert: {alert_error}")
-              _save_json_state(GLOBAL_RATE_LIMIT_STATE, state)
-          
-          
-          def record_global_rate_limit_success():
-              if GLOBAL_RATE_LIMIT_STATE.exists():
-                  _clear_json_state(GLOBAL_RATE_LIMIT_STATE)
-          
-          
+
+
           def configure_repository(config, monitor_kind):
               """Set repository-specific API, state, webhook, and message styling."""
               global REPO, PROJECT_NAME, API_URL, STATE, CURRENT_WEBHOOK, CURRENT_API_BASE_URL
               global CURRENT_GITHUB_WEB_BASE_URL, CURRENT_ACCENT_COLOR, CURRENT_RELEASE_ASSETS
-              global CURRENT_SHORT_SUMMARY, CURRENT_SUMMARY_LINES, THREAD_STATE, DELIVERY_STATE
+              global CURRENT_SHORT_SUMMARY, CURRENT_SUMMARY_LINES, THREAD_STATE
               global MONITOR_KIND, CURRENT_REPO_TYPE, ISSUE_URL_PATTERN
-          
+
               REPO = config["repo"]
               PROJECT_NAME = config["project_name"]
               CURRENT_WEBHOOK = config["webhook"]
@@ -1123,23 +565,16 @@ jobs:
               CURRENT_SHORT_SUMMARY = config["short_summary"]
               CURRENT_SUMMARY_LINES = config["summary_lines"]
               MONITOR_KIND = monitor_kind
-          
+
               if monitor_kind == "commit":
                   CURRENT_ACCENT_COLOR = config["accent_color"] if config["accent_color"] is not None else DEFAULT_COMMIT_ACCENT_COLOR
                   API_URL = f"{CURRENT_API_BASE_URL}/repos/{REPO}/commits?per_page=100"
               else:
                   CURRENT_ACCENT_COLOR = config["accent_color"] if config["accent_color"] is not None else DEFAULT_RELEASE_ACCENT_COLOR
                   API_URL = f"{CURRENT_API_BASE_URL}/repos/{REPO}/releases?per_page=30"
-          
+
               STATE = state_path_for_repo(REPO)
               THREAD_STATE = thread_state_path_for_repo(REPO)
-              DELIVERY_STATE = delivery_state_path_for_repo(REPO)
-              # A repo type switch makes the old delivery mechanism inapplicable. Clear the
-              # unrelated resume state so a later config change cannot resurrect stale progress.
-              if CURRENT_REPO_TYPE == "forum":
-                  _clear_json_state(DELIVERY_STATE)
-              else:
-                  clear_thread_progress()
               ISSUE_URL_PATTERN = re.compile(
                   r"(?<!\]\()(?<!\w)"
                   + re.escape(CURRENT_GITHUB_WEB_BASE_URL)
@@ -1147,176 +582,58 @@ jobs:
                   + re.escape(REPO)
                   + r"/(?:pull|issues)/(\d+)(?=[\s).,]|$)"
               )
-          
-          def _http_error_body(error):
-              try:
-                  return error.read().decode("utf-8", errors="replace")
-              except Exception:
-                  return ""
-          
-          
-          def _looks_like_secondary_rate_limit(status, headers, body_text):
-              if status == 429:
-                  return True
-              if status != 403:
-                  return False
-              if headers.get("Retry-After"):
-                  return True
-              message = body_text.lower()
-              return (
-                  "secondary rate limit" in message
-                  or "abuse detection" in message
-                  or "too many requests" in message
-              )
-          
-          
-          def fetch_with_retry(request_factory, service="generic"):
-              """Retry transient failures and classify GitHub primary/secondary rate limits explicitly."""
+
+          def fetch_with_retry(request_factory):
+              """Retry on network errors and HTTP 429; any other HTTPError is raised immediately."""
+              last_error = None
               network_attempt = 0
-              transient_http_attempt = 0
               rate_limit_attempt = 0
-              primary_rate_limit_waited = False
-          
               while True:
                   try:
                       req = request_factory()
                       with urllib.request.urlopen(req, timeout=30) as response:
                           return response.read()
                   except urllib.error.HTTPError as error:
-                      headers = error.headers or {}
-                      body_text = ""
-                      if service == "github" and error.code in {403, 429}:
-                          body_text = _http_error_body(error)
-          
-                      if service == "github":
-                          remaining = headers.get("X-RateLimit-Remaining")
-                          reset = headers.get("X-RateLimit-Reset")
-                          remaining_is_zero = str(remaining).strip() == "0"
-                          if error.code in {403, 429} and remaining_is_zero:
-                              reset_epoch = None
-                              try:
-                                  reset_epoch = int(reset) if reset else None
-                              except (TypeError, ValueError):
-                                  reset_epoch = None
-          
-                              if not primary_rate_limit_waited and reset_epoch is not None:
-                                  wait = reset_epoch - time.time() + 1
-                                  if 0 < wait <= GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS:
-                                      primary_rate_limit_waited = True
-                                      print(
-                                          f"GitHub primary rate limit is exhausted; waiting {wait:.1f}s for reset."
-                                      )
-                                      time.sleep(wait)
-                                      continue
-          
-                              raise GitHubRateLimitError(
-                                  reset_epoch,
-                                  f"GitHub primary API rate limit exhausted (reset {_format_reset_time(reset_epoch)})."
-                              ) from error
-          
-                          if _looks_like_secondary_rate_limit(error.code, headers, body_text):
-                              if rate_limit_attempt < RATE_LIMIT_RETRY_ATTEMPTS:
-                                  rate_limit_attempt += 1
-                                  retry_after = headers.get("Retry-After")
-                                  try:
-                                      wait = float(retry_after)
-                                  except (TypeError, ValueError):
-                                      wait = RETRY_BACKOFF_SECONDS * rate_limit_attempt
-                                  wait = min(max(wait, 0), RATE_LIMIT_MAX_WAIT_SECONDS)
-                                  print(
-                                      f"GitHub secondary/HTTP rate limit ({error.code}), waiting {wait:.1f}s "
-                                      f"before retry ({rate_limit_attempt}/{RATE_LIMIT_RETRY_ATTEMPTS})"
-                                  )
-                                  time.sleep(wait)
-                                  continue
-                              raise
-          
-                          if error.code == 404:
-                              raise GitHubPermanentError(
-                                  404,
-                                  f"GitHub returned HTTP 404 for {REPO}. The repository may have been renamed, deleted, or made private."
-                              ) from error
-                          if error.code == 401:
-                              raise GitHubPermanentError(
-                                  401,
-                                  "GitHub returned HTTP 401. The GitHub token is missing, invalid, or expired."
-                              ) from error
-                          if error.code == 403:
-                              raise GitHubPermanentError(
-                                  403,
-                                  "GitHub returned HTTP 403. The GitHub token is not authorized to access this repository."
-                              ) from error
-          
                       if error.code == 429 and rate_limit_attempt < RATE_LIMIT_RETRY_ATTEMPTS:
                           rate_limit_attempt += 1
-                          retry_after = headers.get("Retry-After")
+                          retry_after = error.headers.get("Retry-After") if error.headers else None
                           try:
                               wait = float(retry_after)
                           except (TypeError, ValueError):
                               wait = RETRY_BACKOFF_SECONDS * rate_limit_attempt
                           wait = min(max(wait, 0), RATE_LIMIT_MAX_WAIT_SECONDS)
-                          print(
-                              f"Rate limited (429), waiting {wait:.1f}s before retry "
-                              f"({rate_limit_attempt}/{RATE_LIMIT_RETRY_ATTEMPTS})"
-                          )
+                          print(f"Rate limited (429), waiting {wait:.1f}s before retry "
+                                f"({rate_limit_attempt}/{RATE_LIMIT_RETRY_ATTEMPTS})")
                           time.sleep(wait)
+                          last_error = error
                           continue
-          
-                      if service in {"github", "discord"} and 500 <= error.code <= 599:
-                          if transient_http_attempt < 2:
-                              transient_http_attempt += 1
-                              wait = RETRY_BACKOFF_SECONDS * transient_http_attempt
-                              print(
-                                  f"HTTP {error.code} from {service}; waiting {wait:.1f}s before retry "
-                                  f"({transient_http_attempt}/2)"
-                              )
-                              time.sleep(wait)
-                              continue
-          
-                      if error.code == 408:
-                          if transient_http_attempt < 2:
-                              transient_http_attempt += 1
-                              wait = RETRY_BACKOFF_SECONDS * transient_http_attempt
-                              time.sleep(wait)
-                              continue
-          
                       raise
                   except (urllib.error.URLError, TimeoutError) as error:
                       network_attempt += 1
+                      last_error = error
                       print(f"Attempt {network_attempt}/{RETRY_ATTEMPTS} failed: {error}")
                       if network_attempt < RETRY_ATTEMPTS:
                           time.sleep(RETRY_BACKOFF_SECONDS * network_attempt)
                       else:
-                          raise
-          
-          
-          def get_recent_commits(max_pages=1):
-              """Fetch commits from the most recent GitHub API page."""
-              commits = []
-              for page in range(1, max_pages + 1):
-                  separator = "&" if "?" in API_URL else "?"
-                  page_url = f"{API_URL}{separator}page={page}"
-          
-                  def build_request():
-                      headers = {
-                          "Accept": "application/vnd.github+json",
-                          "User-Agent": "GitHub-Discord-Monitor/1.0",
-                          "X-GitHub-Api-Version": "2022-11-28",
-                      }
-                      if GITHUB_TOKEN:
-                          headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-                      return urllib.request.Request(page_url, headers=headers)
-          
-                  body = fetch_with_retry(build_request, service="github")
-                  batch = json.loads(body)
-                  if not batch:
-                      break
-                  commits.extend(batch)
-                  if len(batch) < 100:
-                      break
-              return commits
-          
-          
+                          raise last_error
+
+
+          def get_recent_commits():
+              """Fetch the most recent page of commits."""
+              def build_request():
+                  headers = {
+                      "Accept": "application/vnd.github+json",
+                      "User-Agent": "GitHub-Discord-Monitor/1.0",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  }
+                  if GITHUB_TOKEN:
+                      headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+                  return urllib.request.Request(API_URL, headers=headers)
+
+              body = fetch_with_retry(build_request)
+              return json.loads(body)
+
+
           def build_ping(ping_mode, ping_id):
               """Returns (ping_text, allowed_mentions) for a repository's ping settings."""
               if ping_mode == "user" and ping_id:
@@ -1326,20 +643,20 @@ jobs:
               if ping_mode == "everyone":
                   return "@everyone", {"parse": ["everyone"]}
               return "", {}
-          
-          
+
+
           def maybe_send_inactivity_reminder():
               """Send exactly one reminder per 59-day inactivity cycle and cache that fact."""
               output_path = os.environ.get("GITHUB_OUTPUT")
               if output_path:
                   with open(output_path, "a", encoding="utf-8") as output:
                       output.write("reminder_sent=false\n")
-          
+
               eligible = os.environ.get("REMINDER_ELIGIBLE", "").strip().lower() == "true"
               cache_hit = os.environ.get("REMINDER_CACHE_HIT", "").strip().lower() == "true"
               if not eligible or cache_hit:
                   return
-          
+
               ping_text, ping_mentions = build_ping(DEFAULT_PING_MODE, DEFAULT_PING_ID)
               title = "## Workflow Re-enable Reminder"
               body = (
@@ -1348,7 +665,7 @@ jobs:
                   "**Please re-enable this workflow tomorrow to prevent the monitoring system from being disabled.**\n\n"
                   "No action is required today. **The workflow should be re-enabled the day after this reminder is sent.**"
               )
-          
+
               components = []
               if ping_text:
                   components.append({"type": 10, "content": ping_text})
@@ -1357,7 +674,7 @@ jobs:
                   {"type": 14, "spacing": 1},
                   {"type": 10, "content": body},
               ], DEFAULT_INACTIVITY_ACCENT_COLOR))
-          
+
               global CURRENT_WEBHOOK
               previous_webhook = CURRENT_WEBHOOK
               if not DEFAULT_WEBHOOK:
@@ -1378,15 +695,15 @@ jobs:
                       print("Sent inactivity reminder.")
               finally:
                   CURRENT_WEBHOOK = previous_webhook
-          
+
               marker = Path(os.environ["REMINDER_CACHE_MARKER"])
               marker.parent.mkdir(parents=True, exist_ok=True)
               marker.write_text("reminded\n", encoding="utf-8")
-          
+
               if output_path:
                   with open(output_path, "a", encoding="utf-8") as output:
                       output.write("reminder_sent=true\n")
-          
+
           def send_discord(components, allowed_mentions=None, thread_name=None, thread_id=None, applied_tags=None):
               # Throttle sends to avoid tripping Discord's rate limit.
               last_sent = _last_discord_send_at["t"]
@@ -1394,42 +711,37 @@ jobs:
                   elapsed = time.monotonic() - last_sent
                   if elapsed < DISCORD_SEND_DELAY_SECONDS:
                       time.sleep(DISCORD_SEND_DELAY_SECONDS - elapsed)
-          
-          
+
+
               if thread_name and thread_id:
                   raise ValueError("thread_name and thread_id are mutually exclusive")
-          
+
               if not CURRENT_WEBHOOK:
                   raise RuntimeError(f"No Discord webhook was resolved for {REPO or 'the current workflow'}.")
-          
-              parsed_webhook = urlparse(CURRENT_WEBHOOK)
-              query_params = [
-                  (key, value)
-                  for key, value in parse_qsl(parsed_webhook.query, keep_blank_values=True)
-                  if key not in {"wait", "with_components"}
-              ]
-              if thread_id or thread_name:
-                  query_params = [(key, value) for key, value in query_params if key != "thread_id"]
-              query_params.extend([("wait", "true"), ("with_components", "true")])
+
+              separator = "&" if "?" in CURRENT_WEBHOOK else "?"
+              query = ["wait=true", "with_components=true"]
+
               if thread_id:
-                  query_params.append(("thread_id", str(thread_id)))
-              url = urlunparse(parsed_webhook._replace(query=urlencode(query_params)))
-          
+                  query.append(f"thread_id={thread_id}")
+
+              url = f"{CURRENT_WEBHOOK}{separator}{'&'.join(query)}"
+
               payload = {
                   "flags": 32768,
                   "allowed_mentions": allowed_mentions or {},
                   "components": components,
               }
-          
+
               # Forum-channel webhooks require thread_name when creating a new post.
               if thread_name:
                   payload["thread_name"] = thread_name
                   if applied_tags:
                       payload["applied_tags"] = [str(tag_id) for tag_id in applied_tags]
-          
-          
+
+
               body = json.dumps(payload).encode("utf-8")
-          
+
               def build_request():
                   return urllib.request.Request(
                       url,
@@ -1440,78 +752,45 @@ jobs:
                       },
                       method="POST",
                   )
-          
+
               try:
-                  response_body = fetch_with_retry(build_request, service="discord")
+                  response_body = fetch_with_retry(build_request)
                   return json.loads(response_body) if response_body else {}
               except urllib.error.HTTPError as error:
                   error_body = error.read().decode("utf-8", errors="replace")
                   print(f"Discord error HTTP {error.code}: {error_body}")
-                  if error.code == 404 and thread_id:
-                      raise DiscordThreadGoneError(404, f"Discord Forum thread {thread_id} no longer exists.") from error
-                  if error.code in {401, 403, 404}:
-                      raise DiscordPermanentError(
-                          error.code,
-                          f"Discord webhook returned HTTP {error.code}. The webhook may be invalid, deleted, or unauthorized. Response: {error_body[:500]}",
-                      ) from error
                   raise
               finally:
                   _last_discord_send_at["t"] = time.monotonic()
-          
-          
+
+
           def make_forum_title(title):
               # Discord forum post titles have a 100-character maximum.
               title = re.sub(r"\s+", " ", title).strip()
               return title[:100].rstrip()
-          
-          
-          
+
+
+
           def load_thread_progress():
-              """Load durable Forum-post resume state, refusing ambiguous/corrupt state."""
+              """Load durable Forum-post resume state, if a previous run stopped mid-post."""
               if not THREAD_STATE.exists():
                   return None
               try:
-                  data = json.loads(THREAD_STATE.read_text(encoding="utf-8"))
+                  data = json.loads(THREAD_STATE.read_text())
               except (OSError, json.JSONDecodeError) as error:
-                  raise RuntimeError(f"Could not read Forum thread progress state safely: {error}") from error
-          
+                  print(f"Could not read Forum thread progress state: {error}")
+                  return None
+
               if not isinstance(data, dict):
-                  raise RuntimeError("Forum thread progress state is not an object.")
-          
-              required = ("repo", "kind", "item_id", "thread_id", "next_part", "total_parts", "fingerprint")
-              missing = [key for key in required if key not in data]
-              if missing:
-                  print(
-                      "Forum thread progress state is missing required fields: "
-                      + ", ".join(missing)
-                      + "; discarding stale resume state."
-                  )
-                  clear_thread_progress()
+                  print("Forum thread progress state is not an object; ignoring it.")
                   return None
-              if not all(str(data.get(key, "")).strip() for key in ("repo", "kind", "item_id", "thread_id", "fingerprint")):
-                  print("Forum thread progress state contains an empty required value; discarding stale resume state.")
-                  clear_thread_progress()
-                  return None
-              if data.get("kind") not in {"commit", "release"}:
-                  raise RuntimeError(f"Forum thread progress state has invalid kind: {data.get('kind')!r}.")
-              try:
-                  next_part = int(data["next_part"])
-                  total_parts = int(data["total_parts"])
-              except (TypeError, ValueError) as error:
-                  raise RuntimeError("Forum thread progress state has a non-numeric part index.") from error
-              if total_parts < 1 or next_part < 1 or next_part > total_parts + 1:
-                  raise RuntimeError(
-                      f"Forum thread progress state has invalid part range: next_part={next_part}, total_parts={total_parts}."
-                  )
+
               return data
-          
-          
-          def save_thread_progress(repo, kind, item_id, thread_id, next_part, total_parts, forum_title, fingerprint):
-              """Persist the repo, item, thread ID, next continuation part, and content fingerprint."""
+
+
+          def save_thread_progress(repo, kind, item_id, thread_id, next_part, total_parts, forum_title):
+              """Persist the repo, item, thread ID, and next continuation part."""
               THREAD_STATE.parent.mkdir(parents=True, exist_ok=True)
-              fingerprint = str(fingerprint or "").strip()
-              if not fingerprint:
-                  raise ValueError("Forum thread progress requires a content fingerprint.")
               data = {
                   "repo": repo,
                   "kind": kind,
@@ -1520,93 +799,26 @@ jobs:
                   "next_part": int(next_part),
                   "total_parts": int(total_parts),
                   "forum_title": forum_title,
-                  "fingerprint": fingerprint,
               }
-          
+
               temp_path = THREAD_STATE.with_name(THREAD_STATE.name + ".tmp")
-              temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+              temp_path.write_text(json.dumps(data, indent=2) + "\n")
               temp_path.replace(THREAD_STATE)
-          
-          
+
+
           def clear_thread_progress():
               """Remove resume state once the Forum post is completely finished."""
               try:
                   THREAD_STATE.unlink()
               except FileNotFoundError:
                   pass
-          
-          
-          def delivery_fingerprint(messages, title, meta_block, kind):
-              payload = {
-                  "messages": messages,
-                  "title": title,
-                  "meta": meta_block,
-                  "kind": kind,
-              }
-              raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-              return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-          
-          
-          def load_delivery_progress():
-              """Load normal-channel multi-part delivery progress, if a previous run stopped mid-item."""
-              if not DELIVERY_STATE.exists():
-                  return None
-              try:
-                  data = json.loads(DELIVERY_STATE.read_text(encoding="utf-8"))
-              except (OSError, json.JSONDecodeError) as error:
-                  raise RuntimeError(f"Could not read normal delivery progress state: {error}") from error
-              if not isinstance(data, dict):
-                  raise RuntimeError("Normal delivery progress state is not an object.")
-              required = ("repo", "kind", "item_id", "next_part", "total_parts", "fingerprint")
-              missing = [key for key in required if key not in data]
-              if missing:
-                  raise RuntimeError(
-                      "Normal delivery progress state is missing required fields: " + ", ".join(missing)
-                  )
-              if not all(str(data.get(key, "")).strip() for key in ("repo", "kind", "item_id", "fingerprint")):
-                  raise RuntimeError("Normal delivery progress state contains an empty required value.")
-              if data.get("kind") not in {"commit", "release"}:
-                  raise RuntimeError(f"Normal delivery progress state has invalid kind: {data.get('kind')!r}.")
-              try:
-                  next_part = int(data["next_part"])
-                  total_parts = int(data["total_parts"])
-              except (TypeError, ValueError) as error:
-                  raise RuntimeError("Normal delivery progress state has a non-numeric part index.") from error
-              if total_parts < 1 or next_part < 1 or next_part > total_parts + 1:
-                  raise RuntimeError(
-                      f"Normal delivery progress state has invalid part range: next_part={next_part}, total_parts={total_parts}."
-                  )
-              return data
-          
-          
-          def save_delivery_progress(repo, kind, item_id, next_part, total_parts, fingerprint):
-              """Persist normal-channel multi-part delivery state after each successfully sent part."""
-              DELIVERY_STATE.parent.mkdir(parents=True, exist_ok=True)
-              data = {
-                  "repo": repo,
-                  "kind": kind,
-                  "item_id": item_id,
-                  "next_part": int(next_part),
-                  "total_parts": int(total_parts),
-                  "fingerprint": fingerprint,
-              }
-              temp_path = DELIVERY_STATE.with_name(DELIVERY_STATE.name + ".tmp")
-              temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-              temp_path.replace(DELIVERY_STATE)
-          
-          
-          def clear_delivery_progress():
-              try:
-                  DELIVERY_STATE.unlink()
-              except FileNotFoundError:
-                  pass
-          
-          
+
+
           # Convert bare "#123" refs and bare issue/PR URLs into real links (Discord doesn't auto-link either).
           ISSUE_REF_PATTERN = re.compile(r"(?<![\[\w/#])#(\d+)(?!\w)")
           ISSUE_URL_PATTERN = re.compile(r"a^b")  # replaced by configure_repository() before linkification
-          
-          
+
+
           def linkify_issue_refs(text):
               text = ISSUE_URL_PATTERN.sub(
                   lambda m: f"[#{m.group(1)}]({m.group(0)})", text
@@ -1616,8 +828,8 @@ jobs:
                   text,
               )
               return text
-          
-          
+
+
           VERSION_PATTERN_EXPLICIT = re.compile(
               r"(?i)\b(?:version|ver|update|updated|release|bump|bumped)(?:\s+to)?\s*[:=#-]?\s*(v?\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b"
           )
@@ -1628,25 +840,25 @@ jobs:
           VERSION_PATTERN_NUMERIC_BARE = re.compile(
               r"(?<![\w.-])(\d+(?:\.\d+){2,3}(?:[-+][0-9A-Za-z.-]+)?)(?![\w.-])"
           )
-          
-          
+
+
           def extract_update_version(message):
               """Find an update/release version in a commit message, or return Unknown."""
               match = VERSION_PATTERN_EXPLICIT.search(message)
               if match:
                   return match.group(1)
-          
+
               match = VERSION_PATTERN_BARE.search(message)
               if match:
                   return match.group(1)
-          
+
               match = VERSION_PATTERN_NUMERIC_BARE.search(message)
               if match:
                   return match.group(1)
-          
+
               return "Unknown"
-          
-          
+
+
           CHANGE_SECTION_RE = re.compile(
               r"^\s*(?:#{1,6}\s*)?(Added|Add|Removed|Remove|Changed|Change|Fixed|Fix)(?:\s+(?:changes?|items?|entries?))?\s*:?\s*$",
               re.IGNORECASE,
@@ -1660,37 +872,32 @@ jobs:
               r"^(?:the\s+)?(?:readme|documentation|docs?|comments?|whitespace|formatting|lint(?:ing)?|code\s+style|style\s+cleanup|ci|github\s+actions?|workflow|tests?|test\s+updates?|dependency\s+bump|dependency\s+update|dependencies?\s+(?:updated|bumped|upgraded))$",
               re.IGNORECASE,
           )
-          
+
           CHANGE_SECTION_NAMES = {
               "add": "Added",
-              "adds": "Added",
               "added": "Added",
               "remove": "Removed",
-              "removes": "Removed",
               "removed": "Removed",
               "change": "Changed",
-              "changes": "Changed",
               "changed": "Changed",
               "modify": "Changed",
-              "modifies": "Changed",
               "modified": "Changed",
               "fix": "Fixed",
-              "fixes": "Fixed",
               "fixed": "Fixed",
           }
-          
+
           def _clean_change_description(text):
               text = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", text).strip()
               text = text.strip(" \t:-")
               text = re.sub(r"\s+", " ", text)
               return text
-          
-          
+
+
           def _is_noise_only(text):
               cleaned = re.sub(r"[\*`_#]+", "", text).strip(" .,:;-\t")
               return not cleaned or bool(NOISE_ONLY_RE.fullmatch(cleaned))
-          
-          
+
+
           def _add_change(changes, category, description):
               description = _clean_change_description(description)
               if len(description) < 3 or _is_noise_only(description):
@@ -1698,8 +905,8 @@ jobs:
               bucket = changes.setdefault(category, [])
               if description not in bucket:
                   bucket.append(description)
-          
-          
+
+
           def _extract_verb_segments(line, changes):
               matches = list(CHANGE_VERB_RE.finditer(line))
               if not matches:
@@ -1715,52 +922,52 @@ jobs:
                   description = re.sub(r"^(?:and|but|then)\s+", "", description, flags=re.IGNORECASE)
                   description = re.sub(r"\s+(?:and|but|then)$", "", description, flags=re.IGNORECASE)
                   _add_change(changes, category, description)
-          
-          
+
+
           def extract_meaningful_update(message):
               """Extract user-facing Added/Removed/Changed/Fixed information from a commit message.
-          
+
               Formatting is optional. Changelog labels, section headings, bullet lists, and ordinary
               sentences are all supported. A plain version/update line is not enough by itself.
               """
               changes = {"Added": [], "Removed": [], "Changed": [], "Fixed": []}
               active_section = None
-          
+
               for raw_line in message.splitlines():
                   line = raw_line.strip()
                   if not line:
                       active_section = None
                       continue
-          
+
                   section_match = CHANGE_SECTION_RE.match(line)
                   if section_match:
                       active_section = CHANGE_SECTION_NAMES[section_match.group(1).lower()]
                       continue
-          
+
                   bullet_match = BULLET_RE.match(line)
                   if active_section and bullet_match:
                       _add_change(changes, active_section, bullet_match.group(1))
                       continue
-          
+
                   if extract_update_version(line) != "Unknown" and not re.search(
                       r"\b(?:added|adds|add|removed|removes|remove|changed|changes|change|modified|modifies|modify|fixed|fixes|fix)\b",
                       line,
                       re.IGNORECASE,
                   ):
                       continue
-          
+
                   _extract_verb_segments(line, changes)
-          
+
               ordered = [(name, items) for name, items in changes.items() if items]
               if not ordered:
                   return None
-          
+
               return "\n\n".join(
                   "### " + name + "\n" + "\n".join(f"- {item}" for item in items)
                   for name, items in ordered
               )
-          
-          
+
+
           def commit_is_bot(commit):
               """Ignore GitHub/automation bot authors unconditionally."""
               identities = []
@@ -1772,7 +979,7 @@ jobs:
                       value = user.get(field)
                       if value:
                           identities.append(str(value).strip().lower())
-          
+
               commit_data = commit.get("commit") or {}
               for key in ("author", "committer"):
                   identity = commit_data.get(key) or {}
@@ -1780,36 +987,36 @@ jobs:
                       value = identity.get(field)
                       if value:
                           identities.append(str(value).strip().lower())
-          
+
               return any(
                   identity.endswith("[bot]")
                   or ("github-actions" in identity and "bot" in identity)
                   or ("dependabot" in identity and "bot" in identity)
                   for identity in identities
               )
-          
-          
+
+
           def analyze_commit(commit):
               """Return extracted user-facing update data, or None for bots, merges, or non-update commits."""
               if commit_is_bot(commit):
                   return None
               if len(commit.get("parents") or []) > 1:
                   return None
-          
+
               raw_message = (commit.get("commit") or {}).get("message", "").strip()
               if not raw_message:
                   return None
-          
+
               meaningful = extract_meaningful_update(raw_message)
               if not meaningful:
                   return None
-          
+
               return {
                   "version": extract_update_version(raw_message),
                   "message": meaningful,
               }
-          
-          
+
+
           def commit_meta(commit):
               sha = commit["sha"]
               short_sha = sha[:7]
@@ -1824,15 +1031,15 @@ jobs:
                   return short_sha, commit_url, author_name, "", ""
               message = linkify_issue_refs(analysis["message"])
               return short_sha, commit_url, author_name, analysis["version"], message
-          
-          
+
+
           HEADING_PATTERN = re.compile(r"^#{1,6}\s+\S")
-          
-          
+
+
           def is_heading_line(line):
               return bool(HEADING_PATTERN.match(line))
-          
-          
+
+
           def split_long_line(line, capacity):
               """Break a line into pieces <= capacity, splitting on whitespace only."""
               if len(line) <= capacity:
@@ -1848,20 +1055,20 @@ jobs:
               if remaining:
                   pieces.append(remaining)
               return pieces
-          
-          
+
+
           def pack_messages(text, first_text_capacity, rest_text_capacity,
                              first_component_capacity, rest_component_capacity):
               """Pack text into Discord messages (lists of ("text", str)/("sep", None) pieces) under Discord's per-message limits."""
               atom_capacity = max(min(first_text_capacity, rest_text_capacity), MIN_CHUNK)
-          
+
               atoms = []  # (text, starts_a_new_heading_section)
               for line in text.split("\n"):
                   pieces = split_long_line(line, atom_capacity)
                   heading = is_heading_line(line)
                   for i, piece in enumerate(pieces):
                       atoms.append((piece, heading and i == 0))
-          
+
               messages = []
               current_msg = []
               current_text = []
@@ -1870,14 +1077,14 @@ jobs:
               text_capacity = max(first_text_capacity, MIN_CHUNK)
               component_capacity = max(first_component_capacity, 1)
               first_atom = True
-          
+
               def close_text():
                   nonlocal msg_component_count
                   if current_text:
                       current_msg.append(("text", "\n".join(current_text)))
                       current_text.clear()
                       msg_component_count += 1
-          
+
               def close_message():
                   nonlocal msg_text_len, msg_component_count, text_capacity, component_capacity
                   close_text()
@@ -1888,7 +1095,7 @@ jobs:
                   msg_component_count = 0
                   text_capacity = max(rest_text_capacity, MIN_CHUNK)
                   component_capacity = max(rest_component_capacity, 1)
-          
+
               for atom_text, starts_heading in atoms:
                   if starts_heading and not first_atom:
                       pending_close_cost = 1 if current_text else 0
@@ -1912,97 +1119,14 @@ jobs:
                           current_text.append(atom_text)
                           msg_text_len += joined_len
                   first_atom = False
-          
+
               close_message()
               return messages or [[("text", text)]]
-          
-          
-          def _clear_incompatible_progress(item_ids=None):
-              """Remove resume files for items that are being intentionally skipped."""
-              if item_ids is None:
-                  clear_delivery_progress()
-                  clear_thread_progress()
-                  return
-          
-              selected = {str(item) for item in item_ids}
-              delivery = load_delivery_progress() if DELIVERY_STATE.exists() else None
-              if delivery and (
-                  delivery.get("repo") != REPO
-                  or delivery.get("kind") != MONITOR_KIND
-                  or str(delivery.get("item_id")) not in selected
-              ):
-                  clear_delivery_progress()
-          
-              thread = load_thread_progress() if THREAD_STATE.exists() else None
-              if thread and (
-                  thread.get("repo") != REPO
-                  or thread.get("kind") != MONITOR_KIND
-                  or str(thread.get("item_id")) not in selected
-              ):
-                  clear_thread_progress()
-          
-          
-          def send_forum_part(components, mentions, index, total, forum_title, kind, item_id, thread_id, applied_tags):
-              """Send a Forum continuation, recreating the thread if Discord says the old thread is gone."""
-              try:
-                  send_discord(components, mentions, thread_id=thread_id)
-                  return thread_id
-              except DiscordThreadGoneError:
-                  print(f"Saved Forum thread {thread_id} no longer exists; creating a fresh Forum post.")
-                  clear_thread_progress()
-                  response = send_discord(
-                      components,
-                      mentions,
-                      thread_name=make_forum_title(f"{forum_title} (continued)"),
-                      applied_tags=applied_tags,
-                  )
-                  new_thread_id = response.get("channel_id")
-                  if not new_thread_id:
-                      raise RuntimeError("Discord created the replacement Forum post but did not return its thread/channel ID.")
-                  return str(new_thread_id)
-          
-          
-          def _normal_delivery_start(item_id, total_parts, fingerprint):
-              progress = load_delivery_progress()
-              if not progress:
-                  return 1
-          
-              if (
-                  progress["repo"] != REPO
-                  or progress["kind"] != MONITOR_KIND
-                  or progress["item_id"] != item_id
-              ):
-                  raise RuntimeError(
-                      f"Stale normal-channel delivery progress exists for {REPO}: "
-                      f"repo={progress.get('repo', 'unknown')}, kind={progress.get('kind', 'unknown')}, "
-                      f"item={progress.get('item_id', 'unknown')}. Refusing to restart automatically to avoid a duplicate post."
-                  )
-          
-              saved_fingerprint = str(progress.get("fingerprint", "")).strip()
-              if saved_fingerprint and saved_fingerprint != fingerprint:
-                  raise RuntimeError(
-                      f"Saved normal-channel delivery content for {REPO} {MONITOR_KIND} item {item_id} "
-                      "no longer matches the current content. Refusing to restart automatically to avoid mixed or duplicate parts."
-                  )
-          
-              start_index = int(progress["next_part"])
-              saved_total = int(progress["total_parts"])
-          
-              if saved_total != total_parts:
-                  raise RuntimeError(
-                      f"Saved normal-channel delivery for {REPO} {MONITOR_KIND} item {item_id} expects "
-                      f"{saved_total} parts, but the current content is {total_parts} parts."
-                  )
-              if start_index < 1 or start_index > total_parts + 1:
-                  raise RuntimeError(
-                      f"Saved normal-channel delivery for {REPO} {MONITOR_KIND} item {item_id} has invalid next_part={start_index}."
-                  )
-              return start_index
-          
-          
+
+
           def send_commit(commit, ping, note=None, applied_tags=None, ping_mode=None, ping_id=None):
               short_sha, commit_url, author_name, version, message = commit_meta(commit)
-          
+
               title = f"## {PROJECT_NAME} Updated!"
               meta_lines = (
                   f"**Author:** {author_name}\n"
@@ -2010,37 +1134,30 @@ jobs:
                   f"**Link:** {commit_url}"
               )
               meta_block = f"{note}\n\n{meta_lines}" if note else meta_lines
-          
+
               ping_text, ping_mentions = build_ping(ping_mode, ping_id) if ping else ("", {})
-          
+
               changelog_heading = "## Change Log:"
-              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(changelog_heading) + 1  # newline after the heading prefix
+              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(changelog_heading)
               first_text_capacity = TOTAL_MESSAGE_BUDGET - first_overhead
               rest_text_capacity = TOTAL_MESSAGE_BUDGET - CONTINUATION_LABEL_OVERHEAD
               first_component_capacity = MAX_TOTAL_COMPONENTS - FIRST_FIXED_COMPONENTS
               rest_component_capacity = MAX_TOTAL_COMPONENTS - CONTINUATION_FIXED_COMPONENTS
-          
+
               messages = pack_messages(
                   message, first_text_capacity, rest_text_capacity,
                   first_component_capacity, rest_component_capacity,
               )
               total = len(messages)
-          
+
               if CURRENT_REPO_TYPE != "forum":
-                  fingerprint = delivery_fingerprint(messages, title, meta_block, "commit")
-                  start_index = _normal_delivery_start(commit["sha"], total, fingerprint)
-                  if start_index > total:
-                      clear_delivery_progress()
-                      return
-          
-                  for index in range(start_index, total + 1):
-                      pieces = messages[index - 1]
+                  for index, pieces in enumerate(messages, start=1):
                       components = []
                       mentions = {}
                       if index == 1 and ping_text:
                           components.append({"type": 10, "content": ping_text})
                           mentions = ping_mentions
-          
+
                       container = []
                       if index == 1:
                           container.append({"type": 10, "content": title})
@@ -2050,7 +1167,7 @@ jobs:
                           heading_prefix = changelog_heading
                       else:
                           heading_prefix = f"## Change Log (continued) — Part {index}/{total}:"
-          
+
                       first_text_done = False
                       for kind, content in pieces:
                           if kind == "sep":
@@ -2060,19 +1177,16 @@ jobs:
                                   content = f"{heading_prefix}\n{content}"
                                   first_text_done = True
                               container.append({"type": 10, "content": content})
-          
+
                       components.append(make_container(container, CURRENT_ACCENT_COLOR))
                       send_discord(components, mentions)
-                      save_delivery_progress(REPO, "commit", commit["sha"], index + 1, total, fingerprint)
-                  clear_delivery_progress()
                   return
-          
+
               forum_title = make_forum_title(f"{PROJECT_NAME} Updated! — Version {version}")
-              forum_fingerprint = delivery_fingerprint(messages, title, meta_block, "commit")
               progress = load_thread_progress()
               thread_id = None
               start_index = 1
-          
+
               if (
                   progress
                   and progress.get("repo", REPO) == REPO
@@ -2080,27 +1194,18 @@ jobs:
                   and progress.get("item_id") == commit["sha"]
                   and progress.get("thread_id")
               ):
-                  saved_fingerprint = str(progress.get("fingerprint", "")).strip()
-                  if saved_fingerprint and saved_fingerprint != forum_fingerprint:
-                      print(
-                          f"Forum continuation content for {REPO} commit {commit['sha']} changed; discarding stale thread progress "
-                          "and creating a fresh Forum post."
-                      )
-                      clear_thread_progress()
-                      progress = None
+                  thread_id = str(progress["thread_id"])
+                  try:
+                      start_index = int(progress.get("next_part", 1))
+                  except (TypeError, ValueError):
+                      start_index = 1
+                  if start_index < 1 or start_index > total + 1:
+                      print("Invalid saved continuation position; starting a new Forum post.")
+                      thread_id = None
+                      start_index = 1
                   else:
-                      thread_id = str(progress["thread_id"])
-                      try:
-                          start_index = int(progress.get("next_part", 1))
-                      except (TypeError, ValueError):
-                          start_index = 1
-                      if start_index < 1 or start_index > total + 1:
-                          print("Invalid saved continuation position; starting a new Forum post.")
-                          thread_id = None
-                          start_index = 1
-                      else:
-                          print(f"Resuming Forum post {thread_id} for commit {short_sha} at part {start_index}/{total}.")
-          
+                      print(f"Resuming Forum post {thread_id} for commit {short_sha} at part {start_index}/{total}.")
+
               if progress and (
                   progress.get("repo", REPO) != REPO
                   or progress.get("kind") != "commit"
@@ -2111,7 +1216,7 @@ jobs:
                       f"kind={progress.get('kind', 'unknown')}, item={progress.get('item_id', 'unknown')}) "
                       f"while processing repo={REPO}, item={commit['sha']}."
                   )
-          
+
               for index in range(start_index, total + 1):
                   pieces = messages[index - 1]
                   components = []
@@ -2119,7 +1224,7 @@ jobs:
                   if index == 1 and ping_text:
                       components.append({"type": 10, "content": ping_text})
                       mentions = ping_mentions
-          
+
                   container = []
                   if index == 1:
                       container.extend([
@@ -2131,7 +1236,7 @@ jobs:
                       heading_prefix = changelog_heading
                   else:
                       heading_prefix = f"## Change Log (continued) — Part {index}/{total}:"
-          
+
                   first_text_done = False
                   for kind, content in pieces:
                       if kind == "sep":
@@ -2142,21 +1247,19 @@ jobs:
                               first_text_done = True
                           container.append({"type": 10, "content": content})
                   components.append(make_container(container, CURRENT_ACCENT_COLOR))
-          
+
                   if index == 1 and thread_id is None:
                       response = send_discord(components, mentions, thread_name=forum_title, applied_tags=applied_tags)
                       thread_id = response.get("channel_id")
                       if not thread_id:
                           raise RuntimeError("Discord created the Forum post but did not return its thread/channel ID.")
-                      save_thread_progress(REPO, "commit", commit["sha"], thread_id, 2, total, forum_title, forum_fingerprint)
+                      save_thread_progress(REPO, "commit", commit["sha"], thread_id, 2, total, forum_title)
                   else:
-                      thread_id = send_forum_part(
-                          components, mentions, index, total, forum_title, "commit", commit["sha"], thread_id, applied_tags
-                      )
-                      save_thread_progress(REPO, "commit", commit["sha"], thread_id, index + 1, total, forum_title, forum_fingerprint)
-          
+                      send_discord(components, mentions, thread_id=thread_id)
+                      save_thread_progress(REPO, "commit", commit["sha"], thread_id, index + 1, total, forum_title)
+
               clear_thread_progress()
-          
+
           def get_recent_releases():
               def build_request():
                   headers = {
@@ -2167,24 +1270,18 @@ jobs:
                   if GITHUB_TOKEN:
                       headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
                   return urllib.request.Request(API_URL, headers=headers)
-          
-              body = fetch_with_retry(build_request, service="github")
+
+              body = fetch_with_retry(build_request)
               releases = json.loads(body)  # newest first
-              # Mirror /releases/latest semantics: exclude drafts and prereleases, and ignore
-              # malformed release objects without a usable tag because the tag is the state key.
-              return [
-                  r for r in releases
-                  if not r.get("draft")
-                  and not r.get("prerelease")
-                  and str(r.get("tag_name") or "").strip()
-              ]
-          
+              # Mirror /releases/latest semantics: exclude drafts and prereleases.
+              return [r for r in releases if not r.get("draft") and not r.get("prerelease")]
+
           def release_meta(release):
-              tag = str(release.get("tag_name") or "").strip()
-              release_url = str(release.get("html_url") or "").strip()
-              author = (release.get("author") or {}).get("login") or "Unknown"
+              tag = release.get("tag_name", "").strip()
+              release_url = release.get("html_url")
+              author = (release.get("author") or {}).get("login", "Unknown")
               raw_notes = (release.get("body") or "").strip() or "(No release notes.)"
-          
+
               if CURRENT_SHORT_SUMMARY:
                   note_lines = raw_notes.splitlines()
                   selected = note_lines[:CURRENT_SUMMARY_LINES]
@@ -2195,9 +1292,9 @@ jobs:
                       notes += f"\n\n[View full release]({release_url})"
               else:
                   notes = raw_notes
-          
+
               notes = linkify_issue_refs(notes)
-          
+
               if CURRENT_RELEASE_ASSETS:
                   assets = release.get("assets") or []
                   asset_lines = []
@@ -2215,12 +1312,12 @@ jobs:
                               f"\n\n_Showing {MAX_RELEASE_ASSETS_LISTED} of {total_assets} release assets. "
                               + (f"[View the GitHub release]({release_url}) for all assets._" if release_url else "View the GitHub release for all assets._")
                           )
-          
+
               return tag, release_url, author, notes
-          
+
           def send_release(release, ping, note=None, applied_tags=None, ping_mode=None, ping_id=None):
               tag, release_url, author, notes = release_meta(release)
-          
+
               title = f"## {PROJECT_NAME} Updated!"
               meta_lines = (
                   f"**Version:** {tag}\n"
@@ -2229,35 +1326,28 @@ jobs:
               )
               meta_block = f"{note}\n\n{meta_lines}" if note else meta_lines
               ping_text, ping_mentions = build_ping(ping_mode, ping_id) if ping else ("", {})
-          
+
               notes_heading = "## Release Notes:"
-              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(notes_heading) + 1  # newline after the heading prefix
+              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(notes_heading)
               first_text_capacity = TOTAL_MESSAGE_BUDGET - first_overhead
               rest_text_capacity = TOTAL_MESSAGE_BUDGET - CONTINUATION_LABEL_OVERHEAD
               first_component_capacity = MAX_TOTAL_COMPONENTS - FIRST_FIXED_COMPONENTS
               rest_component_capacity = MAX_TOTAL_COMPONENTS - CONTINUATION_FIXED_COMPONENTS
-          
+
               messages = pack_messages(
                   notes, first_text_capacity, rest_text_capacity,
                   first_component_capacity, rest_component_capacity,
               )
               total = len(messages)
-          
+
               if CURRENT_REPO_TYPE != "forum":
-                  fingerprint = delivery_fingerprint(messages, title, meta_block, "release")
-                  start_index = _normal_delivery_start(tag, total, fingerprint)
-                  if start_index > total:
-                      clear_delivery_progress()
-                      return
-          
-                  for index in range(start_index, total + 1):
-                      pieces = messages[index - 1]
+                  for index, pieces in enumerate(messages, start=1):
                       components = []
                       mentions = {}
                       if index == 1 and ping_text:
                           components.append({"type": 10, "content": ping_text})
                           mentions = ping_mentions
-          
+
                       container = []
                       if index == 1:
                           container.extend([
@@ -2269,7 +1359,7 @@ jobs:
                           heading_prefix = notes_heading
                       else:
                           heading_prefix = f"## Release Notes (continued) — Part {index}/{total}:"
-          
+
                       first_text_done = False
                       for kind, content in pieces:
                           if kind == "sep":
@@ -2281,16 +1371,13 @@ jobs:
                               container.append({"type": 10, "content": content})
                       components.append(make_container(container, CURRENT_ACCENT_COLOR))
                       send_discord(components, mentions)
-                      save_delivery_progress(REPO, "release", tag, index + 1, total, fingerprint)
-                  clear_delivery_progress()
                   return
-          
+
               forum_title = make_forum_title(f"{PROJECT_NAME} Updated! — {tag}")
-              forum_fingerprint = delivery_fingerprint(messages, title, meta_block, "release")
               progress = load_thread_progress()
               thread_id = None
               start_index = 1
-          
+
               if (
                   progress
                   and progress.get("repo", REPO) == REPO
@@ -2298,27 +1385,18 @@ jobs:
                   and progress.get("item_id") == tag
                   and progress.get("thread_id")
               ):
-                  saved_fingerprint = str(progress.get("fingerprint", "")).strip()
-                  if saved_fingerprint and saved_fingerprint != forum_fingerprint:
-                      print(
-                          f"Forum continuation content for {REPO} release {tag} changed; discarding stale thread progress "
-                          "and creating a fresh Forum post."
-                      )
-                      clear_thread_progress()
-                      progress = None
+                  thread_id = str(progress["thread_id"])
+                  try:
+                      start_index = int(progress.get("next_part", 1))
+                  except (TypeError, ValueError):
+                      start_index = 1
+                  if start_index < 1 or start_index > total + 1:
+                      print("Invalid saved continuation position; starting a new Forum post.")
+                      thread_id = None
+                      start_index = 1
                   else:
-                      thread_id = str(progress["thread_id"])
-                      try:
-                          start_index = int(progress.get("next_part", 1))
-                      except (TypeError, ValueError):
-                          start_index = 1
-                      if start_index < 1 or start_index > total + 1:
-                          print("Invalid saved continuation position; starting a new Forum post.")
-                          thread_id = None
-                          start_index = 1
-                      else:
-                          print(f"Resuming Forum post {thread_id} for release {tag} at part {start_index}/{total}.")
-          
+                      print(f"Resuming Forum post {thread_id} for release {tag} at part {start_index}/{total}.")
+
               if progress and (
                   progress.get("repo", REPO) != REPO
                   or progress.get("kind") != "release"
@@ -2329,7 +1407,7 @@ jobs:
                       f"kind={progress.get('kind', 'unknown')}, item={progress.get('item_id', 'unknown')}) "
                       f"while processing repo={REPO}, item={tag}."
                   )
-          
+
               for index in range(start_index, total + 1):
                   pieces = messages[index - 1]
                   components = []
@@ -2337,7 +1415,7 @@ jobs:
                   if index == 1 and ping_text:
                       components.append({"type": 10, "content": ping_text})
                       mentions = ping_mentions
-          
+
                   container = []
                   if index == 1:
                       container.extend([
@@ -2349,7 +1427,7 @@ jobs:
                       heading_prefix = notes_heading
                   else:
                       heading_prefix = f"## Release Notes (continued) — Part {index}/{total}:"
-          
+
                   first_text_done = False
                   for kind, content in pieces:
                       if kind == "sep":
@@ -2360,48 +1438,43 @@ jobs:
                               first_text_done = True
                           container.append({"type": 10, "content": content})
                   components.append(make_container(container, CURRENT_ACCENT_COLOR))
-          
+
                   if index == 1 and thread_id is None:
                       response = send_discord(components, mentions, thread_name=forum_title, applied_tags=applied_tags)
                       thread_id = response.get("channel_id")
                       if not thread_id:
                           raise RuntimeError("Discord created the Forum post but did not return its thread/channel ID.")
-                      save_thread_progress(REPO, "release", tag, thread_id, 2, total, forum_title, forum_fingerprint)
+                      save_thread_progress(REPO, "release", tag, thread_id, 2, total, forum_title)
                   else:
-                      thread_id = send_forum_part(
-                          components, mentions, index, total, forum_title, "release", tag, thread_id, applied_tags
-                      )
-                      save_thread_progress(REPO, "release", tag, thread_id, index + 1, total, forum_title, forum_fingerprint)
-          
+                      send_discord(components, mentions, thread_id=thread_id)
+                      save_thread_progress(REPO, "release", tag, thread_id, index + 1, total, forum_title)
+
               clear_thread_progress()
-          
-          
+
+
           def monitor_releases(config):
               configure_repository(config, "release")
               ping_sent = False
               applied_tag_ids = config["tags"] if CURRENT_REPO_TYPE == "forum" else []
               if applied_tag_ids:
                   print(f"Forum tags configured for {REPO}: {', '.join(applied_tag_ids)}")
-          
+
               releases = get_recent_releases()
               if not releases:
-                  _clear_incompatible_progress(set())
                   print(f"No published releases found for {REPO}.")
                   return ping_sent
-          
+
               latest_tag = releases[0].get("tag_name", "").strip()
               old_tag = STATE.read_text().strip() if STATE.exists() else ""
-          
+
               if latest_tag == old_tag:
-                  _clear_incompatible_progress(set())
                   print(f"No new release for {REPO}.")
                   return ping_sent
-          
+
               STATE.parent.mkdir(parents=True, exist_ok=True)
-          
+
               if not old_tag:
                   if not NOTIFY_ON_INITIAL_RUN:
-                      _clear_incompatible_progress(set())
                       STATE.write_text(latest_tag + "\n")
                       print(f"First run for {REPO}: recording the latest release without sending a notification.")
                       return ping_sent
@@ -2416,27 +1489,24 @@ jobs:
                   else:
                       new_releases = [releases[0]]
                       gap = True
-          
+
               overflow = 0
               if len(new_releases) > MAX_RELEASES_PER_RUN:
                   overflow = len(new_releases) - MAX_RELEASES_PER_RUN
                   new_releases = new_releases[-MAX_RELEASES_PER_RUN:]
-          
-              selected_release_ids = {r.get("tag_name", "").strip() for r in new_releases}
-              _clear_incompatible_progress(selected_release_ids)
-          
+
               print(
                   f"New releases to report for {REPO}: {len(new_releases)}"
                   + (f", {overflow} more not shown individually" if overflow else "")
                   + (", gap detected (older release not found in history)" if gap else "")
               )
-          
+
               note = None
               if gap:
                   note = "_Could not find the last-seen release in recent history - showing the latest release only._"
               elif overflow:
                   note = f"_{overflow} earlier release(s) in this batch were not posted individually._"
-          
+
               for i, release in enumerate(new_releases):
                   should_ping = not ping_sent
                   send_release(
@@ -2447,40 +1517,37 @@ jobs:
                       ping_mode=config["ping_mode"],
                       ping_id=config["ping_id"],
                   )
+                  STATE.write_text(release.get("tag_name", "").strip() + "\n")
                   if should_ping:
                       ping_sent = True
-                  STATE.write_text(release.get("tag_name", "").strip() + "\n")
-          
+
               print(f"Discord notification(s) sent and state saved for {REPO}.")
               return ping_sent
-          
-          
+
+
           def monitor_commits(config):
               configure_repository(config, "commit")
               ping_sent = False
               applied_tag_ids = config["tags"] if CURRENT_REPO_TYPE == "forum" else []
               if applied_tag_ids:
                   print(f"Forum tags configured for {REPO}: {', '.join(applied_tag_ids)}")
-          
-              commits = get_recent_commits(max_pages=1)
+
+              commits = get_recent_commits()
               if not commits:
-                  _clear_incompatible_progress(set())
                   print(f"No commits found for {REPO}.")
                   return ping_sent
-          
+
               latest_sha = commits[0]["sha"]
               old_sha = STATE.read_text().strip() if STATE.exists() else ""
-          
+
               if latest_sha == old_sha:
-                  _clear_incompatible_progress(set())
                   print(f"No new commit for {REPO}.")
                   return ping_sent
-          
+
               STATE.parent.mkdir(parents=True, exist_ok=True)
-          
+
               if not old_sha:
                   if not NOTIFY_ON_INITIAL_RUN:
-                      _clear_incompatible_progress(set())
                       STATE.write_text(latest_sha + "\n")
                       print(f"First run for {REPO}: recording the latest commit without sending a notification.")
                       return ping_sent
@@ -2495,7 +1562,7 @@ jobs:
                   else:
                       raw_new_commits = [commits[0]]
                       gap = True
-          
+
               eligible_commits = []
               for commit in raw_new_commits:
                   analysis = analyze_commit(commit)
@@ -2503,33 +1570,28 @@ jobs:
                       commit["_update_analysis"] = analysis
                       eligible_commits.append(commit)
               filtered_count = len(raw_new_commits) - len(eligible_commits)
-          
+
               note = None
               if gap:
                   note = "_Could not find the last-seen commit in recent history - showing the latest commit only._"
-          
+
               if not eligible_commits:
-                  _clear_incompatible_progress(set())
                   STATE.write_text(latest_sha + "\n")
                   print(f"No commits matched the configured filters for {REPO}; advanced state past {len(raw_new_commits)} new commit(s).")
                   return ping_sent
-          
+
               overflow = 0
               if len(eligible_commits) > MAX_COMMITS_PER_RUN:
                   overflow = len(eligible_commits) - MAX_COMMITS_PER_RUN
                   eligible_commits = eligible_commits[-MAX_COMMITS_PER_RUN:]
-          
-              selected_commit_ids = {c["sha"] for c in eligible_commits}
-              if gap or overflow:
-                  _clear_incompatible_progress(selected_commit_ids)
-          
+
               if overflow:
                   overflow_note = f"_{overflow} earlier matching commit(s) in this batch were not posted individually._"
                   note = f"{note}\n\n{overflow_note}" if note else overflow_note
               if filtered_count:
                   filter_note = f"_{filtered_count} commit(s) were ignored as non-update noise._"
                   note = f"{note}\n\n{filter_note}" if note else filter_note
-          
+
               for i, commit in enumerate(eligible_commits):
                   should_ping = not ping_sent
                   send_commit(
@@ -2542,29 +1604,13 @@ jobs:
                   )
                   if should_ping:
                       ping_sent = True
-                  STATE.write_text(commit["sha"] + "\n")
-          
+
               STATE.write_text(latest_sha + "\n")
               print(f"Discord notification(s) sent and state saved for {REPO}.")
               return ping_sent
-          
+
           def main():
               configs = parse_repositories(REPOS_RAW)
-              event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-              validation_only = event_name in {"push", "pull_request"}
-          
-              print(f"Config validation passed: {len(configs)} repository block(s) are valid.")
-              for config in configs:
-                  print(
-                      f"- {config['repo']} | type={config['repo_type']} | "
-                      f"monitor={config['monitor_type']} | ping={config['ping_mode']}"
-                  )
-
-              # Push and pull-request runs are validation-only. The parser above is the same parser
-              # used by scheduled/manual monitoring, so config cannot drift between validation and use.
-              # These runs never call Discord or GitHub's repository API and never touch monitor state.
-              if validation_only:
-                  return
 
               # The inactivity reminder is global. If the configured global webhook is used by any
               # Forum repository, create the reminder as a Forum post; otherwise send it normally.
@@ -2573,88 +1619,33 @@ jobs:
                   DEFAULT_WEBHOOK
                   and any(c["repo_type"] == "forum" and c["webhook"] == DEFAULT_WEBHOOK for c in configs)
               )
-              try:
-                  maybe_send_inactivity_reminder()
-              except Exception as error:
-                  # A workflow-level reminder must never prevent repository monitoring from running.
-                  print(f"Inactivity reminder failed; continuing repository monitoring: {error}")
-          
+              maybe_send_inactivity_reminder()
+
               had_error = False
-              github_rate_limit_blocked = False
-          
               for config in configs:
-                  if github_rate_limit_blocked:
-                      print(f"Skipping {config['repo']} because the GitHub primary rate limit already blocked this run.")
-                      continue
-          
-                  kinds = []
-                  if config["monitor_type"] in {"commits", "both"}:
-                      kinds.append("commit")
-                  if config["monitor_type"] in {"releases", "both"}:
-                      kinds.append("release")
-          
-                  # If the config was changed since an earlier run, discard failure state for
-                  # monitor kinds that are no longer active for this repository. Failure-state files
-                  # use the plural config keys ("commits"/"releases"), not the internal singular names.
-                  active_kinds = {"commits" if kind == "commit" else "releases" for kind in kinds}
-          
-                  permanent_path = permanent_failure_state_path_for_repo(config["repo"])
-                  permanent_state = _load_json_state(permanent_path)
-                  if permanent_state:
-                      failed_kinds = set(permanent_state.get("failed_kinds", [])) & active_kinds
-                      if failed_kinds:
-                          permanent_state["failed_kinds"] = sorted(failed_kinds)
-                          _save_json_state(permanent_path, permanent_state)
-                      else:
-                          _clear_json_state(permanent_path)
-          
-                  for inactive_kind in {"commits", "releases"} - active_kinds:
-                      _clear_json_state(failure_state_path_for_repo(config["repo"], inactive_kind))
-          
-                  for kind in kinds:
-                      monitor_config = dict(config)
-                      monitor_config["monitor_type"] = "commits" if kind == "commit" else "releases"
+                  if config["monitor_type"] == "commits":
                       try:
-                          if kind == "commit":
-                              monitor_commits(monitor_config)
-                          else:
-                              monitor_releases(monitor_config)
-                          record_repo_success(monitor_config)
-                      except GitHubRateLimitError as error:
-                          had_error = True
-                          github_rate_limit_blocked = True
-                          record_global_rate_limit_failure(monitor_config, error.reset_epoch)
-                          print(
-                              f"GitHub primary rate limit exhausted while checking {config['repo']}; "
-                              "skipping the remaining repositories for this run."
-                          )
-                          break
-                      except GitHubPermanentError as error:
-                          had_error = True
-                          record_repo_failure(monitor_config, error, permanent=True)
-                          print(f"Permanent GitHub error while monitoring {config['repo']}: {error}")
-                      except DiscordPermanentError as error:
-                          had_error = True
-                          record_repo_failure(monitor_config, error, permanent=True)
-                          print(f"Permanent Discord error while monitoring {config['repo']}: {error}")
+                          monitor_commits(config)
                       except Exception as error:
                           had_error = True
-                          record_repo_failure(monitor_config, error, permanent=False)
-                          print(f"Error while monitoring {kind}s for {config['repo']}: {error}")
-          
-              if not github_rate_limit_blocked:
-                  record_global_rate_limit_success()
-          
+                          print(f"Error while monitoring commits for {config['repo']}: {error}")
+
+                  if config["monitor_type"] == "releases":
+                      try:
+                          monitor_releases(config)
+                      except Exception as error:
+                          had_error = True
+                          print(f"Error while monitoring releases for {config['repo']}: {error}")
+
               if had_error:
                   raise SystemExit(1)
-          
-          
-          
+
+
           main()
           PY
 
       - name: Save monitor state
-        if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}   # never write state during push/PR validation-only runs
+        if: ${{ !cancelled() }}   # still commit partial progress if the previous step failed partway through a batch; skip only on cancellation
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -2663,7 +1654,6 @@ jobs:
           # per-repo state files, so one `git add` picks up everything: new state,
           # updated state, AND a cleared (deleted) resume file once a post finishes.
           if [ -d "$STATE_DIR" ]; then
-            find "$STATE_DIR" -type f -name '*.tmp' -delete
             git add -A -- "$STATE_DIR"
           fi
 
@@ -2681,7 +1671,7 @@ jobs:
           # repo-specific, so there's never a real conflict to resolve here -
           # just a timing window to retry through.
           for attempt in 1 2 3 4 5; do
-            if git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}"; then
+            if git pull --rebase origin "${GITHUB_REF_NAME}" && git push; then
               echo "State pushed successfully."
               exit 0
             fi
