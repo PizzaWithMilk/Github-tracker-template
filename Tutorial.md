@@ -11,10 +11,10 @@ Then put whatever name you want in the `name your file` box. make sure it ends w
 <img width="1920" height="1050" alt="zen_FIbvdTZ7cx" src="https://github.com/user-attachments/assets/9d5e52a4-0996-4f2e-a2d1-446c7eb42a2f" />
 
 Then paste the code from [Repo_Monitor_Template.yml ](https://github.com/PizzaWithMilk/Github-tracker-template/blob/main/Repo_Monitor_Template.yml)
-<img width="1920" height="1050" alt="zen_sPOhh3WJ3L" src="https://github.com/user-attachments/assets/6b3adc97-4e2c-433a-b1ef-a131aa23ae78" />
+<img width="1920" height="1050" alt="zen_I0i3EGVuPH" src="https://github.com/user-attachments/assets/31797fdb-860b-4d99-928b-c22559637e32" />
 
 Then Commit
-<img width="1920" height="1050" alt="zen_69U5QXUFT8" src="https://github.com/user-attachments/assets/af426d9b-adbc-404b-b0c0-613e195fcf06" />
+<img width="1920" height="1050" alt="zen_DsTmBGp42N" src="https://github.com/user-attachments/assets/19f7c354-402c-4631-8637-762e30e3a4a5" />
 
 Then go back to the home page of your repo and Create new file
 <img width="1920" height="1050" alt="zen_CCqzL2VRje" src="https://github.com/user-attachments/assets/92655d5b-e269-4d1b-b8ec-754800da3392" />
