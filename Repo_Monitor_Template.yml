@@ -7,11 +7,11 @@
 # Configuration, styling, webhooks, and monitored repositories are read from config/repos.yml.
 # This same workflow also validates config/repos.yml on every relevant push and pull request.
 
-name: Repo Monitor   
+name: Repo Monitor
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 */5 * * *"
   workflow_dispatch:
   # The same workflow doubles as a lightweight config validator on pushes and pull requests.
   # Validation-only runs never contact Discord and never modify monitor state.
