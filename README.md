@@ -4,7 +4,7 @@
 
 ## What this actually does
 
-This is one ready-to-use automation file for GitHub. Once you set it up, it quietly checks one or more GitHub repos (projects) every 5 minutes, and if something new shows up — a new release or a new commit — it automatically posts a message about it in Discord. You don't need to run anything on your own computer; GitHub runs it for you, on a timer, forever (or until you turn it off).
+This is one ready-to-use automation file for GitHub. Once you set it up, it quietly checks one or more GitHub repos (projects) every 5 hours, and if something new shows up — a new release or a new commit — it automatically posts a message about it in Discord. You don't need to run anything on your own computer; GitHub runs it for you, on a timer, forever (or until you turn it off).
 
 Everything about *how* it behaves — which repos it watches, whether it watches releases or commits or both, which Discord channel each one posts to, who gets pinged, and a handful of formatting options — is controlled entirely by one small config file, `config/repos.yml`, that sits alongside the workflow. You never edit the workflow file itself to change any of that. See [Configuring repos.yml](#configuring-reposyml) below.
 
@@ -20,7 +20,7 @@ If you already know GitHub Actions and Discord webhooks well, skip this part. If
 - **Webhook:** a special web address (URL) that Discord gives you for one specific channel. Any program that sends a message to that address will have its message posted in that channel — no bot, no login, no password needed on Discord's side. Anyone who has the URL can post to your channel with it, so it's worth keeping private — see [Security & permissions notes](#security--permissions-notes) for exactly where it lives in this setup and what that means.
 - **Secret (in GitHub):** a private value that you store in your repo's settings, which workflows can use without it ever being shown in logs or visible to anyone browsing the repo. This workflow doesn't require you to create any secrets — see the note in [Step 4](#step-4-add-your-discord-webhook).
 - **State directory:** a small folder this workflow keeps inside your repo, purely to remember "the last thing I already told you about" — one small bookmark file per repo (and per update type) you're watching, named automatically. You never need to create or edit these files yourself.
-- **Cron schedule:** a standard way of telling a computer "run this automatically, on repeat, at these times" — e.g. "every 5 minutes." You'll see a line like `*/5 * * * *` in the file; you don't need to understand that syntax to use the template as-is.
+- **Cron schedule:** a standard way of telling a computer "run this automatically, on repeat, at these times" — e.g. "every 5 hours." You'll see a line like `*/5 * * * *` in the file; you don't need to understand that syntax to use the template as-is.
 - **Commit / push:** "commit" means saving a change permanently in a repo's history; "push" means sending that saved change up to GitHub. When this README says the workflow "commits" or "pushes" something, it's the automation doing this on its own — you don't have to do anything for that part.
 - **Forum channel vs. regular (text) channel:** explained in the next section.
 
@@ -117,7 +117,7 @@ You do **not** need to do anything for `GITHUB_TOKEN` either — GitHub creates 
 
 ### Step 5: Turn it on and check it worked
 
-Commit and push both files if you haven't already (or click **Commit changes** if you used the GitHub.com website). Once they're saved, the workflow will start running automatically every 5 minutes, forever, without you needing to do anything else.
+Commit and push both files if you haven't already (or click **Commit changes** if you used the GitHub.com website). Once they're saved, the workflow will start running automatically every 5 hours, forever, without you needing to do anything else.
 
 To check it's working right away, without waiting:
 
@@ -268,7 +268,7 @@ This section explains what actually happens behind the scenes, so you know what 
 
 ### Polling and state
 
-"Polling" just means "checking in periodically to see if anything changed." The workflow polls every 5 minutes (GitHub's fastest allowed schedule for this kind of automation), and can also be run manually any time via **Actions → Run workflow**.
+"Polling" just means "checking in periodically to see if anything changed." The workflow polls every 5 hours (GitHub's fastest allowed schedule for this kind of automation), and can also be run manually any time via **Actions → Run workflow**.
 
 Every single time it runs, here's exactly what happens, for each update type (commits and/or releases, per that repo's `monitor:` setting) on each repo in `config/repos.yml`, in turn:
 
@@ -399,7 +399,7 @@ Whether the reminder posts as a Forum thread or a plain message is worked out au
 
 A few more details worth knowing:
 
-- You won't be spammed with this every 5 minutes once the 59-day mark passes — it's remembered (using GitHub's own Actions cache), so you'll only be told about a given quiet stretch once, not on every single run afterward.
+- You won't be spammed with this every 5 hours once the 59-day mark passes — it's remembered (using GitHub's own Actions cache), so you'll only be told about a given quiet stretch once, not on every single run afterward.
 - Any new commit to the repo — including this workflow's own bookmark-file update, the moment anything you're monitoring becomes active again — resets the clock automatically. You won't hear about it again unless another full 59 days of total silence pass.
 - If the repo stays inactive even after you re-enable it, expect to be reminded again roughly every 59 days for as long as that remains true.
 - This is fully automatic — there's nothing extra to set up or configure beyond having a top-level `webhook:` set. It reuses the same top-level `ping_mode`/`ping_id` you already filled in for regular notifications.
@@ -449,7 +449,7 @@ A few more details worth knowing:
 
 **Can I use a Forum-channel webhook for a `type: normal` repo, or the other way around?** No. A Discord webhook is tied to one specific channel of one specific type, and Discord's API expects each kind to be talked to differently. Make sure `type:` and that repo's effective webhook actually match — see [Routing different repos to different Discord channels](#routing-different-repos-to-different-discord-channels).
 
-**Can I make it check more or less often than every 5 minutes?** Yes. Find the `cron:` line under `on: schedule:` near the top of the file and change it. 5 minutes is the fastest GitHub allows; you can make it check less often if you don't need near-instant notifications — e.g. `*/15 * * * *` for every 15 minutes, or `0 * * * *` for once an hour.
+**Can I make it check more or less often than every 5 hours?** Yes. Find the `cron:` line under `on: schedule:` near the top of the file and change it. 5 hours is the fastest GitHub allows; you can make it check less often if you don't need near-instant notifications — e.g. `*/15 * * * *` for every 15 hours, or `0 * * * *` for once an hour.
 
 **How do I pause or completely turn this off?** To pause it temporarily: go to the **Actions** tab, click the workflow, click the **⋯** menu, and choose **Disable workflow**. You can turn it back on the same way, whenever you like. To remove it permanently, just delete the workflow file from `.github/workflows/`.
 
