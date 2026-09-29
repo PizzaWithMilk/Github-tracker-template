@@ -172,10 +172,11 @@ Every block under `repos:` supports these fields. Only `repo` and `type` are req
 | `webhook` | *(inherits the global `webhook`)* | Overrides which Discord channel this repo posts to — see [Routing different repos to different Discord channels](#routing-different-repos-to-different-discord-channels). |
 | `github_api_base_url` | *(inherits the global value)* | Per-repo override, for a repo hosted on a different GitHub instance than the rest of your list. |
 | `accent_color` | *(inherits `commit_accent_color`/`release_accent_color`)* | Overrides the embed accent color just for this repo. |
-| `include_release_assets` | `true` | Release tracking only. Lists the release's downloadable files as links under "Release Assets." |
+| `include_release_assets` | `true` | Release tracking only. Lists the release's downloadable files under "Release Assets," each with a direct download link and a human-readable file size when GitHub provides one (e.g. `App.zip (42 MB)`). See [Release notes options](#release-notes-options). |
 | `short_summary` | `false` | Release tracking only. Shortens long release notes instead of posting them in full — see [Release notes options](#release-notes-options). |
 | `summary_lines` | `8` | Release tracking only, used with `short_summary`. How many lines of the release notes to keep. |
 | `tags` | *(none)* | Forum channels only. A list of Forum tag IDs to apply to this repo's posts — see [Forum channel behavior](#forum-channel-behavior). |
+| `enabled` | `true` | Set to `false` to park this repo without deleting its block or its saved state. Missing `enabled` is treated as enabled. |
 
 There is **no `digest` setting in this version**. Adding `digest:` to a repository block is treated as an unknown setting and will fail config validation.
 
@@ -206,12 +207,17 @@ repos:
     summary_lines: 6
     tags:
       - 111111111111111111
+
+  - repo: owner/parked-for-now
+    type: normal
+    enabled: false              # parked: skipped every run; block and state kept for later
 ```
 
 A few more things worth knowing about how this works:
 
 - **Pinging happens per repo, not once for the whole run.** If three of your listed repos each happen to have something new in the same 5-minute check, each one pings independently — using its own ping settings, whether that's the config's default or a per-repo override — so you'd get three pings, not one shared ping for the whole run. Within a single repo's own batch of catch-up items, only the first one still gets pinged; see [Catching up on multiple items](#catching-up-on-multiple-items).
 - Each repo's bookmark file (inside `STATE_DIR`) is completely independent — one for its commit tracking, one for its release tracking, if `monitor: both` — so one repo catching up on a backlog has no effect on any other repo, or on the other update type for the same repo.
+- **A repo with `enabled: false` is skipped entirely** for that run — no GitHub API calls, no Discord posts, and its bookmark/state files are left untouched. Set it back to `true` (or remove the field) when you want monitoring to resume from where it left off. This is a per-repo alternative to disabling the whole workflow.
 - If one repo in the list is broken somehow (renamed, deleted, a typo, or a repeated API error), it won't stop the *other* repos from being checked and posted about in that same run — but the overall run will still show as failed (a red ✕) in the Actions tab so you notice. Check the run's log for a line starting with `Error while monitoring` to see exactly which repo it was.
 - One exception: if `repos.yml` itself is malformed — a missing `/` in a repo name, an invalid `type` or `ping` value, a `user`/`role` ping with no `ping_id` given, a repo with no webhook available to it, or a setting placed somewhere it isn't allowed, for example — the *entire* run fails immediately, before any repo gets checked at all. See [Troubleshooting](#troubleshooting).
 - There's no field for a custom display name — Discord always shows the repo's own name (the part after the last `/`) as the project name in the message.
@@ -297,7 +303,7 @@ This filtering only affects individual commit notifications — it has no effect
 Two settings, both release-tracking-only, control how much of a release's notes actually get posted:
 
 - **`short_summary: true`** shortens the release notes to `summary_lines` lines (8 by default) instead of posting them in full, and adds a "View full release" link at the end pointing back to GitHub. Useful for projects that write very long release notes.
-- **`include_release_assets: true`** (the default) lists that release's downloadable files as a "Release Assets" section with a direct download link for each one. Set it to `false` if you'd rather not see that list. Only the first 10 assets are listed — if a release has more than that, the section ends with a note like `Showing 10 of 14 release assets. View the GitHub release for all assets.` rather than omitting the rest without saying so.
+- **`include_release_assets: true`** (the default) lists that release's downloadable files as a "Release Assets" section. Each asset is a direct download link, and when GitHub provides a size it is shown next to the filename in a compact form — for example `App.zip (42 MB)` or `checksums.txt (1.2 KB)`. If size is unavailable, a useful content type may be shown instead when it is more specific than a generic binary type. Set `include_release_assets` to `false` if you'd rather not see that list. Only the first 10 assets are listed — if a release has more than that, the section ends with a note like `Showing 10 of 14 release assets. View the GitHub release for all assets.` rather than omitting the rest without saying so.
 
 Only actual GitHub *releases* are reported — draft releases and prereleases are skipped, the same as GitHub's own "latest release" definition on a repo's main page.
 
@@ -416,7 +422,7 @@ A few more details worth knowing:
 
 **One repo in my config keeps failing, but the others post fine.** That's expected — see [Configuring repos.yml](#configuring-reposyml). The run still shows as failed overall so you notice, but the log will tell you exactly which repo via a line like `Error while monitoring OWNER/REPO: ...`, and every other repo in your config is still checked and posted about normally.
 
-**Nothing posted, and there's no error in the Actions tab.** This is very likely completely normal — most runs find nothing new, since most 5-minute windows don't have a new release or commit in them. Open the run's log and look for a line like `No new release.` or `No new commit.` for the repo you're expecting — if you see that, everything is working correctly. If you expected something to have posted and didn't, double-check that repo's `repo:` value in `config/repos.yml` is spelled exactly right (`owner/repo-name`, and capitalization matters), that its `monitor:` setting actually includes the kind of update you're expecting, and that the release/commit genuinely exists on the repo's default (main) branch — the commit monitor only ever watches the default branch. If it's a commit you expected and it isn't showing up, also check [Which commits actually get reported](#which-commits-actually-get-reported) — not every commit qualifies.
+**Nothing posted, and there's no error in the Actions tab.** This is very likely completely normal — most runs find nothing new, since most 5-minute windows don't have a new release or commit in them. Open the run's log and look for a line like `No new release.` or `No new commit.` for the repo you're expecting — if you see that, everything is working correctly. If you expected something to have posted and didn't, double-check that repo's `repo:` value in `config/repos.yml` is spelled exactly right (`owner/repo-name`, and capitalization matters), that its `monitor:` setting actually includes the kind of update you're expecting, that it is not parked with `enabled: false`, and that the release/commit genuinely exists on the repo's default (main) branch — the commit monitor only ever watches the default branch. If it's a commit you expected and it isn't showing up, also check [Which commits actually get reported](#which-commits-actually-get-reported) — not every commit qualifies. A disabled repo is logged as skipped (`Skipping OWNER/REPO because it is disabled`) rather than as an error.
 
 **The workflow doesn't seem to run on its own schedule at all.** GitHub automatically disables scheduled workflows in a repo that's had no commit activity for 60 days. If that's happened, go re-enable it manually from the Actions tab — this workflow tries to warn you about this a day in advance over Discord (see [Inactivity reminder](#inactivity-reminder) above), so you shouldn't be caught completely off guard, but the fix either way is the same: **Actions tab → the workflow → Re-enable workflow**. Scheduled runs can also sometimes be delayed by several minutes when GitHub itself is under heavy load — that's a limitation on GitHub's end, not something this workflow controls.
 
@@ -451,7 +457,9 @@ A few more details worth knowing:
 
 **Can I make it check more or less often than every 5 hours?** Yes. Find the `cron:` line under `on: schedule:` near the top of the file and change it. 5 hours is the fastest GitHub allows; you can make it check less often if you don't need near-instant notifications — e.g. `*/15 * * * *` for every 15 hours, or `0 * * * *` for once an hour.
 
-**How do I pause or completely turn this off?** To pause it temporarily: go to the **Actions** tab, click the workflow, click the **⋯** menu, and choose **Disable workflow**. You can turn it back on the same way, whenever you like. To remove it permanently, just delete the workflow file from `.github/workflows/`.
+**How do I pause or completely turn this off?** To pause the *whole* workflow temporarily: go to the **Actions** tab, click the workflow, click the **⋯** menu, and choose **Disable workflow**. You can turn it back on the same way, whenever you like. To remove it permanently, just delete the workflow file from `.github/workflows/`.
+
+To park a *single* repo without stopping the rest of the monitor, set `enabled: false` on that repo's block in `config/repos.yml`. The block and its saved state stay in place; the monitor simply skips that repo until you set `enabled` back to `true` (or remove the field — missing `enabled` means enabled).
 
 **Will this notify me about draft releases or prereleases?** No, not by default — it only notifies about a repo's actual "latest release," the same definition GitHub itself uses, which excludes drafts and prereleases.
 
