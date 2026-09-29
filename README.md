@@ -178,8 +178,6 @@ Every block under `repos:` supports these fields. Only `repo` and `type` are req
 | `tags` | *(none)* | Forum channels only. A list of Forum tag IDs to apply to this repo's posts — see [Forum channel behavior](#forum-channel-behavior). |
 | `enabled` | `true` | Set to `false` to park this repo without deleting its block or its saved state. Missing `enabled` is treated as enabled. |
 
-There is **no `digest` setting in this version**. Adding `digest:` to a repository block is treated as an unknown setting and will fail config validation.
-
 ### Putting it together
 
 ```yaml
