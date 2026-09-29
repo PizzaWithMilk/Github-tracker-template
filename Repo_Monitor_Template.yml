@@ -209,7 +209,7 @@ jobs:
               key, value = stripped_line.split(":", 1)
               key = key.strip()
               value = strip_config_value(value)
-              if key not in {"repo", "type", "monitor", "ping", "ping_id", "webhook", "github_api_base_url", "accent_color", "tags", "include_release_assets", "short_summary", "summary_lines"}:
+              if key not in {"repo", "type", "monitor", "ping", "ping_id", "webhook", "github_api_base_url", "accent_color", "tags", "include_release_assets", "short_summary", "summary_lines", "enabled"}:
                   raise ValueError(f"Unknown repository setting on line {line_number}: {key!r}.")
               if key in current:
                   raise ValueError(f"Duplicate repository setting on line {line_number}: {key!r}.")
@@ -672,6 +672,7 @@ jobs:
                   "short_summary",
                   "summary_lines",
                   "tags",
+                  "enabled",
               }
               list_keys = {"tags"}
               configs = []
@@ -785,6 +786,7 @@ jobs:
                       config.get("include_release_assets", "true"), True
                   )
                   short_summary = parse_bool_value(config.get("short_summary", "false"), False)
+                  enabled = parse_bool_value(config.get("enabled", "true"), True)
           
                   summary_lines_raw = config.get("summary_lines", "8").strip()
                   try:
@@ -873,6 +875,7 @@ jobs:
                           "short_summary": short_summary,
                           "summary_lines": summary_lines,
                           "tags": tags,
+                          "enabled": enabled,
                       }
                   )
           
@@ -2179,6 +2182,29 @@ jobs:
                   and str(r.get("tag_name") or "").strip()
               ]
           
+          def format_file_size(size_bytes):
+              """Format a byte count as a compact human-readable size (B / KB / MB / GB)."""
+              try:
+                  size = int(size_bytes)
+              except (TypeError, ValueError):
+                  return None
+              if size < 0:
+                  return None
+              if size < 1024:
+                  return f"{size} B"
+              if size < 1024 * 1024:
+                  value = size / 1024
+                  text = f"{value:.1f}".rstrip("0").rstrip(".")
+                  return f"{text} KB"
+              if size < 1024 * 1024 * 1024:
+                  value = size / (1024 * 1024)
+                  text = f"{value:.1f}".rstrip("0").rstrip(".")
+                  return f"{text} MB"
+              value = size / (1024 * 1024 * 1024)
+              text = f"{value:.2f}".rstrip("0").rstrip(".")
+              return f"{text} GB"
+          
+          
           def release_meta(release):
               tag = str(release.get("tag_name") or "").strip()
               release_url = str(release.get("html_url") or "").strip()
@@ -2204,8 +2230,18 @@ jobs:
                   for asset in assets:
                       name = str(asset.get("name") or "").strip()
                       download_url = str(asset.get("browser_download_url") or "").strip()
-                      if name and download_url:
-                          asset_lines.append(f"- [{name}]({download_url})")
+                      if not name or not download_url:
+                          continue
+                      size_text = format_file_size(asset.get("size"))
+                      content_type = str(asset.get("content_type") or "").strip()
+                      # Prefer a compact size summary; fall back to content type when size is missing.
+                      if size_text:
+                          label = f"{name} ({size_text})"
+                      elif content_type and content_type not in {"application/octet-stream", "binary/octet-stream"}:
+                          label = f"{name} ({content_type})"
+                      else:
+                          label = name
+                      asset_lines.append(f"- [{label}]({download_url})")
                   if asset_lines:
                       total_assets = len(asset_lines)
                       shown_asset_lines = asset_lines[:MAX_RELEASE_ASSETS_LISTED]
@@ -2555,9 +2591,10 @@ jobs:
           
               print(f"Config validation passed: {len(configs)} repository block(s) are valid.")
               for config in configs:
+                  enabled_label = "enabled" if config.get("enabled", True) else "disabled"
                   print(
                       f"- {config['repo']} | type={config['repo_type']} | "
-                      f"monitor={config['monitor_type']} | ping={config['ping_mode']}"
+                      f"monitor={config['monitor_type']} | ping={config['ping_mode']} | {enabled_label}"
                   )
 
               # Push and pull-request runs are validation-only. The parser above is the same parser
@@ -2567,11 +2604,16 @@ jobs:
                   return
 
               # The inactivity reminder is global. If the configured global webhook is used by any
-              # Forum repository, create the reminder as a Forum post; otherwise send it normally.
+              # enabled Forum repository, create the reminder as a Forum post; otherwise send it normally.
               global INACTIVITY_FORUM
               INACTIVITY_FORUM = bool(
                   DEFAULT_WEBHOOK
-                  and any(c["repo_type"] == "forum" and c["webhook"] == DEFAULT_WEBHOOK for c in configs)
+                  and any(
+                      c.get("enabled", True)
+                      and c["repo_type"] == "forum"
+                      and c["webhook"] == DEFAULT_WEBHOOK
+                      for c in configs
+                  )
               )
               try:
                   maybe_send_inactivity_reminder()
@@ -2583,6 +2625,9 @@ jobs:
               github_rate_limit_blocked = False
           
               for config in configs:
+                  if not config.get("enabled", True):
+                      print(f"Skipping {config['repo']} because it is disabled (enabled: false). State is left untouched.")
+                      continue
                   if github_rate_limit_blocked:
                       print(f"Skipping {config['repo']} because the GitHub primary rate limit already blocked this run.")
                       continue
