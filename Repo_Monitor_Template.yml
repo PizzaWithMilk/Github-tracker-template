@@ -1,311 +1,70 @@
-# ============================================================================
-# Repo Monitor — TEMPLATE
-#
-# Monitors GitHub commits and releases and posts useful update notifications to Discord.
-# See README.md for setup instructions.
-# ============================================================================
-# Configuration, styling, webhooks, and monitored repositories are read from config/repos.yml.
-# This same workflow also validates config/repos.yml on every relevant push and pull request.
 
 name: Repo Monitor
 
 on:
-  schedule:
-    - cron: "0 */5 * * *"
   workflow_dispatch:
-  # The same workflow doubles as a lightweight config validator on pushes and pull requests.
-  # Validation-only runs never contact Discord and never modify monitor state.
   push:
-    paths:
-      - "config/repos.yml"
-      - ".github/workflows/Repo_Monitor_Template.yml"
+    paths-ignore:
+      - ".github/monitor-state/**"
   pull_request:
-    paths:
-      - "config/repos.yml"
-      - ".github/workflows/Repo_Monitor_Template.yml"
+    paths-ignore:
+      - ".github/monitor-state/**"
 
 permissions:
   contents: write
 
 jobs:
-  validate:
-    if: ${{ github.event_name == 'push' || github.event_name == 'pull_request' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    concurrency:
-      group: repo-monitor-validation
-      cancel-in-progress: true
-    env:
-      CONFIG_FILE: "config/repos.yml"
-    steps:
-      - name: Checkout config
-        uses: actions/checkout@v4
-
-      - name: Validate config
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python3 <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          CONFIG_FILE = Path(os.environ.get("CONFIG_FILE", "config/repos.yml"))
-          text = CONFIG_FILE.read_text(encoding="utf-8")
-          if not text.strip():
-              raise ValueError("Config file is empty.")
-
-          def strip_config_value(raw_value):
-              """Strip a trailing comment while safely handling quoted values."""
-              value = str(raw_value).strip()
-              if value[:1] in ('"', "'"):
-                  quote = value[0]
-                  closing = None
-                  escaped = False
-                  for index in range(1, len(value)):
-                      char = value[index]
-                      if escaped:
-                          escaped = False
-                          continue
-                      if char == "\\":
-                          escaped = True
-                          continue
-                      if char == quote:
-                          closing = index
-                          break
-                  if closing is None:
-                      raise ValueError("Unterminated quoted config value.")
-                  trailing = value[closing + 1:].strip()
-                  if trailing and not trailing.startswith("#"):
-                      raise ValueError(
-                          f"Unexpected text after quoted config value: {trailing!r}. "
-                          "Only a trailing # comment is allowed."
-                      )
-                  return value[1:closing]
-              comment_match = re.search(r"\s#", value)
-              if comment_match:
-                  value = value[:comment_match.start()]
-              return value.strip()
-
-          def parse_list_value(raw_value):
-              value = str(raw_value).strip()
-              if not value:
-                  return []
-              if value.startswith("[") or value.endswith("]"):
-                  if not (value.startswith("[") and value.endswith("]")):
-                      raise ValueError(f"Invalid inline list value: {value!r}.")
-                  value = value[1:-1].strip()
-                  if not value:
-                      return []
-              return [part.strip().strip('"').strip("'") for part in value.split(",") if part.strip()]
-
-          allowed_top_level_keys = {
-              "ping_mode",
-              "ping_id",
-              "webhook",
-              "github_api_base_url",
-              "commit_accent_color",
-              "release_accent_color",
-              "inactivity_accent_color",
-              "repos",
-          }
-          valid_repo_types = {"normal", "forum"}
-          valid_monitor_types = {"commits", "releases", "both"}
-          valid_ping_modes = {"user", "role", "everyone", "none"}
-
-          top_level = {}
-          seen_top_level_keys = set()
-          repo_lines = []
-          in_repos = False
-          repos_indent = None
-
-          for line_number, raw_line in enumerate(text.splitlines(), start=1):
-              if not raw_line.strip() or raw_line.lstrip().startswith("#"):
-                  if in_repos:
-                      repo_lines.append(raw_line)
-                  continue
-
-              indent = len(raw_line) - len(raw_line.lstrip())
-              stripped = raw_line.strip()
-
-              if indent == 0:
-                  in_repos = False
-                  repos_indent = None
-                  if ":" not in stripped:
-                      raise ValueError(f"Invalid config on line {line_number}: {stripped!r}. Expected 'key: value'.")
-                  key, value = stripped.split(":", 1)
-                  key = key.strip()
-                  value = strip_config_value(value)
-                  if key not in allowed_top_level_keys:
-                      raise ValueError(f"Unknown config setting on line {line_number}: {key!r}.")
-                  if key in seen_top_level_keys:
-                      raise ValueError(f"Duplicate top-level config setting on line {line_number}: {key!r}.")
-                  seen_top_level_keys.add(key)
-                  if key == "repos":
-                      if value:
-                          raise ValueError(f"Invalid 'repos' setting on line {line_number}: the value must contain the repository blocks below it.")
-                      in_repos = True
-                      top_level[key] = True
-                  else:
-                      top_level[key] = value
-                  continue
-
-              if not in_repos:
-                  raise ValueError(f"Invalid config on line {line_number}: indented settings must be inside the 'repos:' section.")
-              if repos_indent is None:
-                  repos_indent = indent
-              if indent < repos_indent:
-                  raise ValueError(f"Invalid config indentation on line {line_number}: repository settings must stay inside 'repos:'.")
-              repo_lines.append(raw_line[repos_indent:])
-
-          if not top_level.get("repos"):
-              raise ValueError("Config is missing the 'repos:' section.")
-
-          current = None
-          configs = []
-          current_list_key = None
-          seen_repo_names = set()
-
-          for line_number, line in enumerate(repo_lines, start=1):
-              if not line.strip() or line.lstrip().startswith("#"):
-                  continue
-              indent = len(line) - len(line.lstrip())
-              stripped_line = line.strip()
-              if indent == 0:
-                  if current is not None:
-                      configs.append(current)
-                      current = None
-                      current_list_key = None
-                  if stripped_line.startswith("- "):
-                      current = {"repo": ""}
-                      current_list_key = None
-                      maybe_repo = stripped_line[2:].strip()
-                      if not maybe_repo:
-                          raise ValueError(f"Invalid repository entry on line {line_number}: expected '- repo: OWNER/REPO'.")
-                      if ":" not in maybe_repo:
-                          raise ValueError(f"Invalid repository entry on line {line_number}: {maybe_repo!r}. Expected 'repo: OWNER/REPO'.")
-                      key, value = maybe_repo.split(":", 1)
-                      key = key.strip()
-                      value = strip_config_value(value)
-                      if key != "repo":
-                          raise ValueError(f"Invalid repository entry on line {line_number}: the first field in each repository block must be 'repo'.")
-                      current[key] = value
-                  else:
-                      raise ValueError(f"Invalid repo config on line {line_number}: repository blocks must begin with '- repo:'.")
-                  continue
-
-              if current is None:
-                  raise ValueError(f"Invalid repository configuration on line {line_number}: repository settings must be inside a '- repo:' block.")
-
-              if stripped_line.startswith("- ") and indent > 0:
-                  if current_list_key != "tags":
-                      raise ValueError(f"Invalid list item on line {line_number}: list items are only valid for 'tags'.")
-                  current["tags"].append(strip_config_value(stripped_line[2:]).strip('"').strip("'"))
-                  continue
-
-              if ":" not in stripped_line:
-                  raise ValueError(f"Invalid repository setting on line {line_number}: {stripped_line!r}. Expected 'key: value'.")
-
-              key, value = stripped_line.split(":", 1)
-              key = key.strip()
-              value = strip_config_value(value)
-              if key not in {"repo", "type", "monitor", "ping", "ping_id", "webhook", "github_api_base_url", "accent_color", "tags", "include_release_assets", "short_summary", "summary_lines", "enabled"}:
-                  raise ValueError(f"Unknown repository setting on line {line_number}: {key!r}.")
-              if key in current:
-                  raise ValueError(f"Duplicate repository setting on line {line_number}: {key!r}.")
-              if key == "tags":
-                  current[key] = parse_list_value(value)
-                  current_list_key = key
-              else:
-                  current[key] = value
-                  current_list_key = None
-
-          if current is not None:
-              configs.append(current)
-
-          for index, config in enumerate(configs, start=1):
-              repo = str(config.get("repo", "")).strip()
-              repo_type = str(config.get("type", "normal")).strip().lower()
-              monitor_type = str(config.get("monitor", "")).strip().lower() or "both"
-              if not repo:
-                  raise ValueError(f"Repository block {index} is missing 'repo: OWNER/REPO'.")
-              if repo_type not in valid_repo_types:
-                  raise ValueError(f"Invalid type in repository block {index}: {repo_type!r}. Use 'normal' or 'forum'.")
-              if monitor_type not in valid_monitor_types:
-                  raise ValueError(f"Invalid monitor in repository block {index}: {monitor_type!r}. Use 'commits', 'releases', or 'both'.")
-              match = re.fullmatch(r"([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})", repo)
-              if not match:
-                  raise ValueError(f"Invalid repo in repository block {index}: {repo!r}. Expected OWNER/REPO.")
-              if repo.casefold() in seen_repo_names:
-                  raise ValueError(f"Duplicate repository in configuration: {repo!r}.")
-              seen_repo_names.add(repo.casefold())
-              tags = config.get("tags", [])
-              if len(set(tags)) != len(tags):
-                  raise ValueError(f"Duplicate Forum tag IDs in repository block {index}.")
-              if len(tags) > 5:
-                  raise ValueError(f"Too many Forum tag IDs in repository block {index} ({len(tags)}). Discord allows at most 5.")
-              for tag_id in tags:
-                  if not re.fullmatch(r"\d+", tag_id):
-                      raise ValueError(f"Invalid Forum tag ID in repository block {index}: {tag_id!r}. Forum tag IDs must be numeric.")
-
-          print(f"Config validation passed: {len(configs)} repository block(s) are valid.")
-          PY
-
   monitor:
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
-      group: repo-monitor
+      group: ${{ github.event_name == 'workflow_dispatch' && 'repo-monitor' || 'repo-monitor-validation' }}
       cancel-in-progress: false
     env:
-      CONFIG_FILE: "config/repos.yml"              # Shared repository and ping configuration.
-      STATE_DIR: ".github/monitor-state"           # <-- CHANGE THIS if you want the monitor state stored somewhere else.
-      NOTIFY_ON_INITIAL_RUN: "true"                # set to "false" to silently record the current latest item on first run instead of posting/pinging about it
+      CONFIG_FILE: "config/repos.yml"
+      STATE_DIR: ".github/monitor-state"
+      NOTIFY_ON_INITIAL_RUN: "true"
 
 
     steps:
       - name: Checkout monitor state
         uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && 0 || 1 }}
+          persist-credentials: true
 
-      - name: Calculate 59-day inactivity reminder state
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-        id: inactivity
-        shell: bash
-        run: |                                  # GitHub's 60-day scheduled-workflow inactivity rule is based on activity in the repository that contains this workflow.
-          interval=$((59 * 24 * 60 * 60))
-          last_commit_epoch="$(git log -1 --format=%ct)"
-          last_commit_sha="$(git rev-parse HEAD)"
-          now_epoch="$(date -u +%s)"
-          elapsed=$((now_epoch - last_commit_epoch))
-          cycle=$((elapsed / interval))
-
-          if [ "$elapsed" -ge "$interval" ]; then
-            eligible="true"
+      - name: Show validation context
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo "SHA: ${{ github.sha }}"
+          echo "Config path: ${{ env.CONFIG_FILE }}"
+          echo "Workspace config/ and workflows:"
+          ls -la config 2>/dev/null || echo "(no config/ directory)"
+          ls -la .github/workflows 2>/dev/null || echo "(no .github/workflows directory)"
+          if [ -f "${{ env.CONFIG_FILE }}" ]; then
+            echo "Config file exists: ${{ env.CONFIG_FILE }}"
+            wc -l "${{ env.CONFIG_FILE }}"
           else
-            eligible="false"
+            echo "::error::Config file missing at ${{ env.CONFIG_FILE }}"
+            exit 1
           fi
 
-          workflow_key="$(printf '%s' "${GITHUB_WORKFLOW_REF:-$GITHUB_WORKFLOW}" | sha256sum | cut -c1-16)"
-
-          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
-          echo "cache_key=github-workflow-inactivity-${workflow_key}-${last_commit_sha}-${cycle}" >> "$GITHUB_OUTPUT"
-
-      - name: Restore 59-day inactivity reminder state
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-        id: inactivity-cache
+      - name: Restore stats dashboard message cache
+        id: stats-cache
         uses: actions/cache/restore@v4
         with:
-          path: .github/.workflow-inactivity-reminder.marker
-          key: ${{ steps.inactivity.outputs.cache_key }}
+          path: .github/monitor-state/_stats.cache.json
+          key: repo-monitor-stats-msg-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            repo-monitor-stats-msg-
 
       - name: Validate config / check for new commits and releases
         id: monitor
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REMINDER_ELIGIBLE: ${{ steps.inactivity.outputs.eligible }}
-          REMINDER_CACHE_HIT: ${{ steps.inactivity-cache.outputs.cache-hit }}
-          REMINDER_CACHE_MARKER: .github/.workflow-inactivity-reminder.marker
+          STATS_MESSAGE_CACHE: .github/monitor-state/_stats.cache.json
         run: |
           python3 <<'PY'
           import hashlib
@@ -315,6 +74,8 @@ jobs:
           import time
           import urllib.request
           import urllib.error
+          import threading
+          from concurrent.futures import ThreadPoolExecutor, as_completed
           from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
           from pathlib import Path
           
@@ -330,36 +91,59 @@ jobs:
           CURRENT_RELEASE_ASSETS = True
           CURRENT_SHORT_SUMMARY = False
           CURRENT_SUMMARY_LINES = 8
+          STATS_ENABLED = False
+          STATS_WEBHOOK = ""
+          STATS_STATE_PATH = STATE_DIR / "_stats.json"
+          STATS_LIFETIME_PATH = STATE_DIR / "_lifetime.json"
+          STATS_MESSAGE_CACHE = Path(os.environ.get("STATS_MESSAGE_CACHE", str(STATE_DIR / "_stats.cache.json")))
+          STATS_WEBHOOK_FINGERPRINT = ""
+          LIFETIME_COUNTER_KEYS = (
+              "runs",
+              "commits_detected",
+              "releases_detected",
+              "discord_notifications",
+              "forum_posts",
+              "errors",
+          )
           MONITOR_KIND = ""
           CURRENT_REPO_TYPE = "normal"
-          INACTIVITY_FORUM = False
           
           GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
           NOTIFY_ON_INITIAL_RUN = os.environ.get("NOTIFY_ON_INITIAL_RUN", "true").strip().lower() not in ("false", "0", "no")
           
           STATE = None
           
-          THREAD_STATE = None  # set per-repo by configure_repository(), like STATE
-          DELIVERY_STATE = None  # set per-repo for normal-channel multi-part delivery recovery
-          # Stay comfortably under Discord's per-message limits (~4000 total text chars, 40 components).
+          THREAD_STATE = None
+          DELIVERY_STATE = None
           TOTAL_MESSAGE_BUDGET = 3800
           MAX_TOTAL_COMPONENTS = 36
-          FIRST_FIXED_COMPONENTS = 6         # ping, container, title, sep, meta, sep
-          CONTINUATION_FIXED_COMPONENTS = 1  # container
-          CONTINUATION_LABEL_OVERHEAD = 80  # room for "(continued) - Part X/Y:" labels
-          MIN_CHUNK = 200  # floor so an unusually long header never stalls chunking
-          MAX_COMMITS_PER_RUN = 10  # cap matching commit notifications posted individually per run
+          FIRST_FIXED_COMPONENTS = 6
+          CONTINUATION_FIXED_COMPONENTS = 1
+          CONTINUATION_LABEL_OVERHEAD = 80
+          MIN_CHUNK = 200
+          MAX_COMMITS_PER_RUN = 10
           MAX_RELEASES_PER_RUN = 10
-          MAX_RELEASE_ASSETS_LISTED = 10  # cap assets listed per release; extras get a "view on GitHub" note
-          RETRY_ATTEMPTS = 3          # attempts for plain network errors (timeouts, DNS, etc.)
+          MAX_RELEASE_ASSETS_LISTED = 10
+          RETRY_ATTEMPTS = 3
           RETRY_BACKOFF_SECONDS = 3
-          RATE_LIMIT_RETRY_ATTEMPTS = 5   # attempts specifically for HTTP 429 (rate limited)
-          RATE_LIMIT_MAX_WAIT_SECONDS = 15  # cap per-wait even if Retry-After asks for longer
-          DISCORD_SEND_DELAY_SECONDS = 0.5  # minimum gap between consecutive Discord messages
-          FAILURE_ALERT_THRESHOLD = 3       # transient failures must persist this many runs before alerting
-          RATE_LIMIT_ALERT_THRESHOLD = 3    # primary GitHub rate-limit failures must persist this many runs before alerting
-          GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS = 30  # wait briefly if the primary rate-limit reset is imminent
-          _last_discord_send_at = {"t": None}  # tracks the last Discord send time for throttling
+          RATE_LIMIT_RETRY_ATTEMPTS = 5
+          RATE_LIMIT_MAX_WAIT_SECONDS = 15
+          DISCORD_SEND_DELAY_SECONDS = 0.5
+          SCHEDULE_INTERVAL_SECONDS = 5 * 60
+          MAX_STATS_TEXT_LENGTH = 3900
+          FAILURE_ALERT_THRESHOLD = 3
+          RATE_LIMIT_ALERT_THRESHOLD = 3
+          GITHUB_RATE_LIMIT_MAX_WAIT_SECONDS = 30
+          MAX_GITHUB_PREFETCH_WORKERS = 6
+          _last_discord_send_at = {"t": None}
+          GITHUB_RATE_LIMIT_INFO = {
+              "remaining": None,
+              "limit": None,
+              "reset": None,
+              "observed_at": None,
+          }
+          _github_rate_limit_lock = threading.Lock()
+          PREFETCH_CACHE = {}
           
           
           class GitHubPermanentError(RuntimeError):
@@ -376,6 +160,10 @@ jobs:
               def __init__(self, reset_epoch=None, message="GitHub API primary rate limit exhausted"):
                   super().__init__(message)
                   self.reset_epoch = reset_epoch
+
+
+          class GitHubNotModified(Exception):
+              """GitHub returned HTTP 304 Not Modified for a conditional request."""
           
           
           class DiscordPermanentError(RuntimeError):
@@ -544,8 +332,15 @@ jobs:
                   "github_api_base_url",
                   "commit_accent_color",
                   "release_accent_color",
-                  "inactivity_accent_color",
+                  "stats_enabled",
+                  "stats_webhook",
+                  "incident_webhook",
+                  "incident_ping_mode",
+                  "incident_ping_id",
                   "repos",
+              }
+              deprecated_top_level_keys = {
+                  "inactivity_accent_color",
               }
               top_level = {}
               seen_top_level_keys = set()
@@ -572,6 +367,13 @@ jobs:
                       key, value = stripped.split(":", 1)
                       key = key.strip()
                       value = strip_config_value(value)
+                      if key in deprecated_top_level_keys:
+                          print(
+                              f"Ignoring deprecated config setting on line {line_number}: {key!r} "
+                              "(no longer used; safe to remove from config/repos.yml)."
+                          )
+                          seen_top_level_keys.add(key)
+                          continue
                       if key not in allowed_top_level_keys:
                           raise ValueError(
                               f"Unknown config setting on line {line_number}: {key!r}. "
@@ -622,28 +424,58 @@ jobs:
                   "release_accent_color": parse_color_value(
                       top_level.get("release_accent_color", "FEE75C"), 0xFEE75C
                   ),
-                  "inactivity_accent_color": parse_color_value(
-                      top_level.get("inactivity_accent_color", "ED4242"), 0xED4242
-                  ),
               }
+              defaults["stats_enabled"] = parse_bool_value(top_level.get("stats_enabled", "false"), False)
+              defaults["stats_webhook"] = normalize_webhook_url(top_level.get("stats_webhook", ""), "stats webhook")
+              if defaults["stats_enabled"] and not defaults["stats_webhook"]:
+                  raise ValueError(
+                      "stats_enabled is true but stats_webhook is empty. Set stats_webhook in config/repos.yml or disable the stats dashboard."
+                  )
+              defaults["incident_webhook"] = normalize_webhook_url(
+                  top_level.get("incident_webhook", ""), "incident webhook"
+              )
+              incident_ping_mode = str(
+                  top_level.get("incident_ping_mode", defaults["ping_mode"])
+              ).strip().lower() or defaults["ping_mode"]
+              defaults["incident_ping_mode"] = incident_ping_mode
+              incident_ping_id = str(
+                  top_level.get("incident_ping_id", defaults["ping_id"])
+              ).strip()
+              if "incident_ping_id" not in top_level:
+                  incident_ping_id = defaults["ping_id"]
+              defaults["incident_ping_id"] = incident_ping_id
               return defaults, "\n".join(repo_lines).strip()
           
-          DEFAULTS, REPOS_RAW = load_config(CONFIG_FILE)
-          
+          print(f"Loading config from {CONFIG_FILE.resolve() if CONFIG_FILE.exists() else CONFIG_FILE}")
+          if not CONFIG_FILE.is_file():
+              print(f"::error::Config file not found: {CONFIG_FILE}")
+              raise FileNotFoundError(
+                  f"Config file not found: {CONFIG_FILE}. Create config/repos.yml with optional global webhook, ping settings, and repos."
+              )
+          try:
+              DEFAULTS, REPOS_RAW = load_config(CONFIG_FILE)
+          except Exception as config_error:
+              print(f"::error::Config validation failed while loading {CONFIG_FILE}: {config_error}")
+              raise
+
           VALID_PING_MODES = {"user", "role", "everyone", "none"}
-          if DEFAULTS["ping_mode"] not in VALID_PING_MODES:
-              raise ValueError(
-                  f"Invalid ping_mode in config: {DEFAULTS['ping_mode']!r}. Use user, role, everyone, or none."
-              )
-          if DEFAULTS["ping_mode"] in {"user", "role"} and not DEFAULTS["ping_id"]:
-              raise ValueError(
-                  f"ping_mode is {DEFAULTS['ping_mode']!r} but ping_id is empty. "
-                  "Set ping_id in config/repos.yml, or change ping_mode to everyone/none."
-              )
-          if DEFAULTS["ping_id"] and not re.fullmatch(r"\d+", DEFAULTS["ping_id"]):
-              raise ValueError(
-                  f"Invalid global ping_id {DEFAULTS['ping_id']!r}. Discord user and role IDs must contain digits only."
-              )
+          try:
+              if DEFAULTS["ping_mode"] not in VALID_PING_MODES:
+                  raise ValueError(
+                      f"Invalid ping_mode in config: {DEFAULTS['ping_mode']!r}. Use user, role, everyone, or none."
+                  )
+              if DEFAULTS["ping_mode"] in {"user", "role"} and not DEFAULTS["ping_id"]:
+                  raise ValueError(
+                      f"ping_mode is {DEFAULTS['ping_mode']!r} but ping_id is empty. "
+                      "Set ping_id in config/repos.yml, or change ping_mode to everyone/none."
+                  )
+              if DEFAULTS["ping_id"] and not re.fullmatch(r"\d+", DEFAULTS["ping_id"]):
+                  raise ValueError(
+                      f"Invalid global ping_id {DEFAULTS['ping_id']!r}. Discord user and role IDs must contain digits only."
+                  )
+          except Exception as config_error:
+              print(f"::error::Config validation failed: {config_error}")
+              raise
           
           DEFAULT_PING_MODE = DEFAULTS["ping_mode"]
           DEFAULT_PING_ID = DEFAULTS["ping_id"]
@@ -651,14 +483,38 @@ jobs:
           DEFAULT_API_BASE_URL = DEFAULTS["github_api_base_url"]
           DEFAULT_COMMIT_ACCENT_COLOR = DEFAULTS["commit_accent_color"]
           DEFAULT_RELEASE_ACCENT_COLOR = DEFAULTS["release_accent_color"]
-          DEFAULT_INACTIVITY_ACCENT_COLOR = DEFAULTS["inactivity_accent_color"]
+          STATS_ENABLED = DEFAULTS["stats_enabled"]
+          STATS_WEBHOOK = DEFAULTS["stats_webhook"]
+          STATS_STATE_PATH = STATE_DIR / "_stats.json"
+          STATS_LIFETIME_PATH = STATE_DIR / "_lifetime.json"
+          STATS_MESSAGE_CACHE = Path(os.environ.get("STATS_MESSAGE_CACHE", str(STATE_DIR / "_stats.cache.json")))
+          STATS_WEBHOOK_FINGERPRINT = hashlib.sha256(STATS_WEBHOOK.encode("utf-8")).hexdigest() if STATS_WEBHOOK else ""
+          INCIDENT_WEBHOOK = DEFAULTS.get("incident_webhook") or ""
+          INCIDENT_PING_MODE = DEFAULTS.get("incident_ping_mode") or DEFAULTS["ping_mode"]
+          INCIDENT_PING_ID = DEFAULTS.get("incident_ping_id") or DEFAULTS["ping_id"]
+          if INCIDENT_WEBHOOK:
+              if INCIDENT_PING_MODE not in VALID_PING_MODES:
+                  raise ValueError(
+                      f"Invalid incident_ping_mode in config: {INCIDENT_PING_MODE!r}. "
+                      "Use user, role, everyone, or none."
+                  )
+              if INCIDENT_PING_MODE in {"user", "role"} and not INCIDENT_PING_ID:
+                  raise ValueError(
+                      f"incident_ping_mode is {INCIDENT_PING_MODE!r} but incident_ping_id is empty. "
+                      "Set incident_ping_id (or global ping_id) in config/repos.yml, or use everyone/none."
+                  )
+              if INCIDENT_PING_ID and not re.fullmatch(r"\d+", INCIDENT_PING_ID):
+                  raise ValueError(
+                      f"Invalid incident_ping_id {INCIDENT_PING_ID!r}. "
+                      "Discord user and role IDs must contain digits only."
+                  )
           
           
           def parse_repositories(raw):
               """Parse one small YAML-style block per repository."""
               repositories = []
               valid_ping_modes = {"user", "role", "everyone", "none"}
-              valid_monitor_types = {"commits", "releases", "both"}
+              valid_monitor_types = {"commits", "releases"}
               allowed_keys = {
                   "repo",
                   "type",
@@ -761,7 +617,7 @@ jobs:
               for index, config in enumerate(configs, start=1):
                   repo = config.get("repo", "").strip()
                   repo_type = config.get("type", "normal").strip().lower()
-                  monitor_type = config.get("monitor", "").strip().lower() or "both"
+                  monitor_type = config.get("monitor", "").strip().lower() or "releases"
           
                   ping_override = config.get("ping", "").strip().lower()
                   ping_id_override = config.get("ping_id", "").strip()
@@ -809,7 +665,7 @@ jobs:
                   if monitor_type not in valid_monitor_types:
                       raise ValueError(
                           f"Invalid monitor in repository block {index}: {monitor_type!r}. "
-                          "Use 'commits', 'releases', or 'both'."
+                          "Use 'commits' or 'releases'."
                       )
                   repo_match = re.fullmatch(r"([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})", repo)
                   if not repo_match:
@@ -917,6 +773,45 @@ jobs:
               return STATE_DIR / f"{key}_permanent_failure.json"
           
           
+          def release_notify_state_path_for_repo(repo):
+              """Return durable state for the repo's *current latest* release notification only.
+
+              Only the newest release is tracked for edited-release detection. When a newer
+              tag is published, this file is overwritten and prior message IDs are discarded.
+              """
+              key = re.sub(r"[^A-Za-z0-9._-]+", "_", repo.replace("/", "__"))
+              return STATE_DIR / f"{key}_release_notify.json"
+
+
+          def etag_state_path_for_repo(repo, kind):
+              """Return durable HTTP validator state (ETag / Last-Modified) for one repo+kind."""
+              key = re.sub(r"[^A-Za-z0-9._-]+", "_", repo.replace("/", "__"))
+              return STATE_DIR / f"{key}_{kind}_etag.json"
+
+
+          def load_etag_state(repo, kind):
+              data = _load_json_state(etag_state_path_for_repo(repo, kind))
+              etag = str(data.get("etag") or "").strip() or None
+              last_modified = str(data.get("last_modified") or "").strip() or None
+              return etag, last_modified
+
+
+          def save_etag_state(repo, kind, etag=None, last_modified=None):
+              path = etag_state_path_for_repo(repo, kind)
+              etag = str(etag or "").strip()
+              last_modified = str(last_modified or "").strip()
+              if not etag and not last_modified:
+                  _clear_json_state(path)
+                  return
+              _save_json_state(
+                  path,
+                  {
+                      "etag": etag,
+                      "last_modified": last_modified,
+                  },
+              )
+          
+          
           GLOBAL_RATE_LIMIT_STATE = STATE_DIR / "_github_primary_rate_limit_failure.json"
           
           
@@ -964,6 +859,1060 @@ jobs:
               return max(value, 0)
           
           
+          def _now_epoch():
+              return int(time.time())
+
+
+          def _iso_to_epoch(value):
+              if not value:
+                  return None
+              try:
+                  from datetime import datetime, timezone
+                  parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                  if parsed.tzinfo is None:
+                      parsed = parsed.replace(tzinfo=timezone.utc)
+                  return int(parsed.timestamp())
+              except (TypeError, ValueError, OverflowError):
+                  return None
+
+
+          def _next_scheduled_check_epoch(now=None):
+              """Return when the next monitor run is expected.
+
+              Uses a fixed interval from *now* (default 5 minutes) rather than the
+              next wall-clock :00/:05 boundary. Clock alignment made "Next Check"
+              show 1–4 minutes right after a run, or "X minutes ago" when the
+              external cron (cron-job.org) is not aligned to those boundaries.
+              """
+              current = int(now if now is not None else _now_epoch())
+              return current + SCHEDULE_INTERVAL_SECONDS
+
+
+          def _stats_default_state():
+              now = _now_epoch()
+              return {
+                  "version": 2,
+                  "message_id": "",
+                  "created_at": now,
+                  "updated_at": now,
+                  "message_created_at": None,
+                  "message_updated_at": None,
+                  "lifetime": {
+                      "runs": 0,
+                      "commits_detected": 0,
+                      "releases_detected": 0,
+                      "discord_notifications": 0,
+                      "forum_posts": 0,
+                      "errors": 0,
+                  },
+                  "repositories": {},
+                  "current": {
+                      "last_run": now,
+                      "last_check": now,
+                      "next_check": _next_scheduled_check_epoch(now),
+                      "repos_total": 0,
+                      "repos_checked": 0,
+                      "new_commits": 0,
+                      "new_releases": 0,
+                      "notifications": 0,
+                      "forum_posts": 0,
+                      "errors": 0,
+                      "rate_limited": False,
+                      "last_successful_check": None,
+                      "last_rate_limit": None,
+                      "last_error": None,
+                  },
+                  "last_known": {
+                      "last_successful_check": None,
+                      "last_rate_limit": None,
+                      "last_rate_limit_reset": None,
+                      "last_error": None,
+                      "github_rate_limit_remaining": None,
+                      "github_rate_limit_limit": None,
+                      "github_rate_limit_reset": None,
+                      "github_rate_limit_observed_at": None,
+                  },
+                  "webhook_fingerprint": STATS_WEBHOOK_FINGERPRINT,
+              }
+
+
+          def _load_stats_message_cache():
+              """Load the Actions-cache backup of stats message_id and lifetime counters."""
+              if not STATS_MESSAGE_CACHE.exists():
+                  return {}
+              try:
+                  data = json.loads(STATS_MESSAGE_CACHE.read_text(encoding="utf-8"))
+                  return data if isinstance(data, dict) else {}
+              except (OSError, json.JSONDecodeError) as error:
+                  print(f"Could not read stats message cache {STATS_MESSAGE_CACHE}: {error}")
+                  return {}
+
+
+          def _coerce_nonneg_int(value, default=0):
+              try:
+                  number = int(value)
+              except (TypeError, ValueError):
+                  return int(default)
+              return number if number >= 0 else int(default)
+
+
+          def _read_lifetime_totals_file():
+              data = _load_json_state(STATS_LIFETIME_PATH)
+              return {key: _coerce_nonneg_int(data.get(key)) for key in LIFETIME_COUNTER_KEYS}
+
+
+          def _monotonic_lifetime_totals(*sources):
+              """Return the per-key maximum across any number of lifetime dicts."""
+              totals = {key: 0 for key in LIFETIME_COUNTER_KEYS}
+              for source in sources:
+                  if not isinstance(source, dict):
+                      continue
+                  for key in LIFETIME_COUNTER_KEYS:
+                      totals[key] = max(totals[key], _coerce_nonneg_int(source.get(key)))
+              return totals
+
+
+          def _write_lifetime_totals_file(totals):
+              payload = {key: _coerce_nonneg_int(totals.get(key)) for key in LIFETIME_COUNTER_KEYS}
+              # Never decrease values already on disk.
+              merged = _monotonic_lifetime_totals(_read_lifetime_totals_file(), payload)
+              _save_json_state(STATS_LIFETIME_PATH, merged)
+              return merged
+
+
+          def _apply_monotonic_lifetime(state):
+              """Raise state lifetime counters to the max of state, git file, and cache."""
+              if state is None:
+                  return
+              lifetime = state.setdefault("lifetime", {})
+              cached = _load_stats_message_cache()
+              cached_fp = str(cached.get("webhook_fingerprint") or "").strip()
+              cache_lifetime = (
+                  cached.get("lifetime")
+                  if (not cached_fp or cached_fp == STATS_WEBHOOK_FINGERPRINT)
+                  else {}
+              )
+              merged = _monotonic_lifetime_totals(
+                  lifetime,
+                  _read_lifetime_totals_file(),
+                  cache_lifetime if isinstance(cache_lifetime, dict) else {},
+              )
+              raised = []
+              for key in LIFETIME_COUNTER_KEYS:
+                  before = _coerce_nonneg_int(lifetime.get(key))
+                  lifetime[key] = merged[key]
+                  if merged[key] > before:
+                      raised.append(f"{key} {before}->{merged[key]}")
+              if raised:
+                  print(
+                      "Restored higher lifetime counters from durable backups "
+                      f"(git/cache): {', '.join(raised)}."
+                  )
+              _write_lifetime_totals_file(merged)
+
+
+          def _save_stats_message_cache(state):
+              """Persist message_id and lifetime counters outside git.
+
+              Lifetime writes are monotonic: an older/stale in-memory state cannot
+              overwrite a higher Errors (or other) total already stored in the cache.
+              """
+              if state is None:
+                  return
+              message_id = str(state.get("message_id") or "").strip()
+              existing = _load_stats_message_cache()
+              lifetime = _monotonic_lifetime_totals(
+                  state.get("lifetime") or {},
+                  existing.get("lifetime") if isinstance(existing.get("lifetime"), dict) else {},
+                  _read_lifetime_totals_file(),
+              )
+              payload = {
+                  "message_id": message_id or str(existing.get("message_id") or "").strip(),
+                  "webhook_fingerprint": STATS_WEBHOOK_FINGERPRINT,
+                  "message_updated_at": state.get("message_updated_at") or existing.get("message_updated_at"),
+                  "message_created_at": state.get("message_created_at") or existing.get("message_created_at"),
+                  "lifetime": lifetime,
+              }
+              if not payload["message_id"] and existing.get("message_id"):
+                  payload["message_id"] = str(existing.get("message_id") or "").strip()
+              try:
+                  STATS_MESSAGE_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                  temp_path = STATS_MESSAGE_CACHE.with_name(STATS_MESSAGE_CACHE.name + ".tmp")
+                  temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+                  temp_path.replace(STATS_MESSAGE_CACHE)
+              except OSError as error:
+                  print(f"Could not write stats message cache: {error}")
+
+
+          def load_stats_state():
+              if not STATS_ENABLED:
+                  return None
+              state = _load_json_state(STATS_STATE_PATH)
+              if not state:
+                  state = _stats_default_state()
+              if state.get("webhook_fingerprint") != STATS_WEBHOOK_FINGERPRINT:
+                  state["message_id"] = ""
+                  state["message_created_at"] = None
+                  state["message_updated_at"] = None
+                  state["webhook_fingerprint"] = STATS_WEBHOOK_FINGERPRINT
+              state["version"] = max(int(state.get("version", 1) or 1), 2)
+              state.setdefault("created_at", _now_epoch())
+              state.setdefault("message_id", "")
+              state.setdefault("updated_at", _now_epoch())
+              state.setdefault("message_created_at", None)
+              state.setdefault("message_updated_at", None)
+              state.setdefault("lifetime", {})
+              state.setdefault("repositories", {})
+              state.setdefault("current", {})
+              state.setdefault("last_known", {})
+              defaults = _stats_default_state()
+              for key, default in defaults["lifetime"].items():
+                  state["lifetime"].setdefault(key, default)
+              for key, default in defaults["current"].items():
+                  state["current"].setdefault(key, default)
+              for key, default in defaults["last_known"].items():
+                  state["last_known"].setdefault(key, default)
+              state["current"].setdefault("last_check", state["current"].get("last_run") or _now_epoch())
+              state["current"].setdefault("next_check", _next_scheduled_check_epoch(state["current"].get("last_check")))
+              state["current"].setdefault("repos_total", 0)
+
+              for key in LIFETIME_COUNTER_KEYS:
+                  state["lifetime"][key] = _coerce_nonneg_int(
+                      state["lifetime"].get(key), defaults["lifetime"].get(key, 0)
+                  )
+
+              cached = _load_stats_message_cache()
+              cached_fp = str(cached.get("webhook_fingerprint") or "").strip()
+              cache_ok = not cached_fp or cached_fp == STATS_WEBHOOK_FINGERPRINT
+
+              if not str(state.get("message_id") or "").strip() and cache_ok:
+                  cached_id = str(cached.get("message_id") or "").strip()
+                  if cached_id:
+                      state["message_id"] = cached_id
+                      if cached.get("message_created_at") and not state.get("message_created_at"):
+                          state["message_created_at"] = cached.get("message_created_at")
+                      if cached.get("message_updated_at") and not state.get("message_updated_at"):
+                          state["message_updated_at"] = cached.get("message_updated_at")
+                      print(
+                          f"Restored stats message_id {cached_id} from Actions cache backup "
+                          "(git state had no message_id — usually a previous push race)."
+                      )
+
+              # Monotonic merge across _stats.json, _lifetime.json, Actions cache, and
+              # last_known high-water mark. Prevents Lifetime Errors from rolling backward.
+              _apply_monotonic_lifetime(state)
+              last_known = state.setdefault("last_known", {})
+              high_water = max(
+                  _coerce_nonneg_int(last_known.get("lifetime_errors_high_water")),
+                  _coerce_nonneg_int(state["lifetime"].get("errors")),
+              )
+              last_known["lifetime_errors_high_water"] = high_water
+              state["lifetime"]["errors"] = high_water
+              # Re-sync every durable store so a partial loss (git vs cache vs lifetime
+              # file) is healed on the next read, not only on the next error.
+              _write_lifetime_totals_file(state["lifetime"])
+              _save_stats_message_cache(state)
+              print(
+                  f"Lifetime counters loaded: "
+                  f"runs={state['lifetime'].get('runs', 0)}, "
+                  f"errors={state['lifetime'].get('errors', 0)}, "
+                  f"notifications={state['lifetime'].get('discord_notifications', 0)}."
+              )
+
+              return state
+
+
+          def save_stats_state(state):
+              if state is None:
+                  return
+              state["updated_at"] = _now_epoch()
+              state["webhook_fingerprint"] = STATS_WEBHOOK_FINGERPRINT
+              # Always raise in-memory totals to the durable high-water marks first so a
+              # stale state object can never write Errors (or other totals) backward.
+              _apply_monotonic_lifetime(state)
+              lifetime = state.setdefault("lifetime", {})
+              last_known = state.setdefault("last_known", {})
+              high_water = _coerce_nonneg_int(last_known.get("lifetime_errors_high_water"))
+              errors = _coerce_nonneg_int(lifetime.get("errors"))
+              if errors > high_water:
+                  last_known["lifetime_errors_high_water"] = errors
+              elif high_water > errors:
+                  lifetime["errors"] = high_water
+              _save_json_state(STATS_STATE_PATH, state)
+              _save_stats_message_cache(state)
+              print(
+                  f"Lifetime counters saved: "
+                  f"runs={lifetime.get('runs', 0)}, "
+                  f"errors={lifetime.get('errors', 0)}."
+              )
+
+
+          def _bump_lifetime_errors(state, amount=1):
+              """Increment lifetime errors and flush every durable store immediately.
+
+              Errors are a high-water mark across _stats.json, _lifetime.json, Actions
+              cache, and last_known.lifetime_errors_high_water. Nothing may lower them.
+              """
+              if state is None:
+                  return 0
+              amount = max(1, int(amount or 1))
+              lifetime = state.setdefault("lifetime", {})
+              last_known = state.setdefault("last_known", {})
+              current = (
+                  _coerce_nonneg_int(lifetime.get("errors"))
+                  + amount
+              )
+              durable = _monotonic_lifetime_totals(
+                  lifetime,
+                  _read_lifetime_totals_file(),
+                  (_load_stats_message_cache().get("lifetime") or {}),
+                  {"errors": last_known.get("lifetime_errors_high_water")},
+              )
+              new_total = max(current, durable.get("errors", 0))
+              lifetime["errors"] = new_total
+              last_known["lifetime_errors_high_water"] = new_total
+              _write_lifetime_totals_file(lifetime)
+              # Full stats save so git snapshot + cache cannot miss this increment.
+              save_stats_state(state)
+              return new_total
+
+
+          def _stats_repo_state(state, repo):
+              repos = state["repositories"]
+              entry = repos.setdefault(repo, {
+                  "commits_detected": 0,
+                  "releases_detected": 0,
+                  "notifications": 0,
+                  "forum_posts": 0,
+                  "last_seen_commit": None,
+                  "last_detected_commit": None,
+                  "last_seen_release": None,
+                  "last_detected_release": None,
+                  "last_successful_check": None,
+                  "last_status": "Unknown",
+                  "last_error": None,
+                  "last_rate_limit": None,
+                  "monitor_kinds": [],
+              })
+              entry.setdefault("last_seen_commit", None)
+              entry.setdefault("last_detected_commit", None)
+              entry.setdefault("last_seen_release", None)
+              entry.setdefault("last_detected_release", None)
+              entry.setdefault("last_successful_check", None)
+              entry.setdefault("last_status", "Unknown")
+              entry.setdefault("last_error", None)
+              entry.setdefault("last_rate_limit", None)
+              entry.setdefault("monitor_kinds", [])
+              return entry
+
+
+          def _stats_set_monitor_kinds(repo_state, monitor_type):
+              """Record whether this repo is monitored for commits or releases."""
+              kinds = set(repo_state.get("monitor_kinds") or [])
+              normalized = str(monitor_type or "").strip().lower()
+              if normalized == "commits":
+                  kinds.add("commits")
+              if normalized == "releases":
+                  kinds.add("releases")
+              repo_state["monitor_kinds"] = sorted(kinds)
+
+
+          def _stats_prune_removed_repos(state, config_repos):
+              """Drop stats entries for repos no longer present in config/repos.yml."""
+              if state is None:
+                  return
+              repos = state.get("repositories")
+              if not isinstance(repos, dict) or not repos:
+                  return
+              keep = {str(repo).strip() for repo in (config_repos or []) if str(repo).strip()}
+              removed = [repo for repo in list(repos.keys()) if repo not in keep]
+              for repo in removed:
+                  repos.pop(repo, None)
+              if removed:
+                  print(
+                      f"Removed {len(removed)} repo(s) from the stats dashboard "
+                      f"(no longer in config): {', '.join(sorted(removed, key=str.casefold))}."
+                  )
+
+
+          def _resolve_next_check_epoch(previous_next=None, last_check=None, now=None):
+              """Keep an upcoming next_check target; only reschedule when it is missing or past."""
+              current = int(now if now is not None else _now_epoch())
+              try:
+                  prev = int(previous_next) if previous_next is not None else None
+              except (TypeError, ValueError):
+                  prev = None
+              if prev is not None and prev > current:
+                  return prev
+              base = last_check if last_check is not None else current
+              try:
+                  base = int(base)
+              except (TypeError, ValueError):
+                  base = current
+              return _next_scheduled_check_epoch(base if base > 0 else current)
+
+
+          def _record_stats_run_start(state, repo_count=0, reset_schedule=True):
+              """Start a new current-run window.
+
+              reset_schedule=True (normal monitor cycles): last_check=now, next_check=now+interval.
+              reset_schedule=False (error/fatal updates): keep the existing countdown when it is
+              still in the future so an error-driven stats edit does not push Next check out.
+              """
+              if state is None:
+                  return
+              now = _now_epoch()
+              previous = state.get("current") or {}
+              previous_next = previous.get("next_check")
+              previous_last_check = previous.get("last_check")
+              state["lifetime"]["runs"] = _coerce_nonneg_int(state["lifetime"].get("runs")) + 1
+              if reset_schedule:
+                  last_check = now
+                  next_check = _next_scheduled_check_epoch(now)
+              else:
+                  last_check = previous_last_check if previous_last_check is not None else now
+                  next_check = _resolve_next_check_epoch(
+                      previous_next, last_check=last_check, now=now
+                  )
+              state["current"] = {
+                  "last_run": now,
+                  "last_check": last_check,
+                  "next_check": next_check,
+                  "repos_total": int(repo_count or 0),
+                  "repos_checked": 0,
+                  "new_commits": 0,
+                  "new_releases": 0,
+                  "notifications": 0,
+                  "forum_posts": 0,
+                  "errors": 0,
+                  "rate_limited": False,
+                  "last_successful_check": state.get("last_known", {}).get("last_successful_check"),
+                  "last_rate_limit": state.get("last_known", {}).get("last_rate_limit"),
+                  "last_error": None,
+                  "_failed_repo_names": [],
+              }
+
+
+          def _record_stats_repo_checked(state, repo):
+              if state is None:
+                  return
+              checked_repos = state["current"].setdefault("_checked_repo_names", [])
+              if repo not in checked_repos:
+                  checked_repos.append(repo)
+                  state["current"]["repos_checked"] += 1
+
+
+          def _record_stats_repo_result(state, config, result):
+              if state is None:
+                  return
+              repo_state = _stats_repo_state(state, config["repo"])
+              _stats_set_monitor_kinds(repo_state, config.get("monitor_type"))
+              now = _now_epoch()
+              failed_repos = state["current"].setdefault("_failed_repo_names", [])
+              if config["repo"] not in failed_repos:
+                  repo_state["last_status"] = "Operational"
+                  repo_state["last_error"] = None
+              repo_state["last_successful_check"] = now
+              _record_stats_repo_checked(state, config["repo"])
+              state["last_known"]["last_successful_check"] = now
+              state["current"]["last_successful_check"] = now
+
+              if not result:
+                  return
+
+              new_commits = int(result.get("new_commits", 0))
+              new_releases = int(result.get("new_releases", 0))
+              notifications = int(result.get("notifications", 0))
+              forum_posts = int(result.get("forum_posts", 0))
+
+              state["current"]["new_commits"] += new_commits
+              state["current"]["new_releases"] += new_releases
+              state["current"]["notifications"] += notifications
+              state["current"]["forum_posts"] += forum_posts
+              state["lifetime"]["commits_detected"] += new_commits
+              state["lifetime"]["releases_detected"] += new_releases
+              state["lifetime"]["discord_notifications"] += notifications
+              state["lifetime"]["forum_posts"] += forum_posts
+
+              repo_state["commits_detected"] += new_commits
+              repo_state["releases_detected"] += new_releases
+              repo_state["notifications"] += notifications
+              repo_state["forum_posts"] += forum_posts
+              if result.get("last_seen_commit"):
+                  repo_state["last_seen_commit"] = result["last_seen_commit"]
+              if result.get("last_detected_commit"):
+                  repo_state["last_detected_commit"] = result["last_detected_commit"]
+              if result.get("last_seen_release"):
+                  repo_state["last_seen_release"] = result["last_seen_release"]
+              if result.get("last_detected_release"):
+                  repo_state["last_detected_release"] = result["last_detected_release"]
+
+
+          def _record_stats_error(state, config, error):
+              if state is None:
+                  return
+              _record_stats_repo_checked(state, config["repo"])
+              failed_repos = state["current"].setdefault("_failed_repo_names", [])
+              if config["repo"] not in failed_repos:
+                  failed_repos.append(config["repo"])
+              repo_state = _stats_repo_state(state, config["repo"])
+              _stats_set_monitor_kinds(repo_state, config.get("monitor_type"))
+              now = _now_epoch()
+              repo_state["last_status"] = "Error"
+              repo_state["last_error"] = str(error)
+              state["current"]["errors"] = _coerce_nonneg_int(state["current"].get("errors")) + 1
+              _bump_lifetime_errors(state, 1)
+              error_info = {
+                  "repo": config["repo"],
+                  "kind": config.get("monitor_type"),
+                  "message": str(error),
+                  "timestamp": now,
+              }
+              state["current"]["last_error"] = error_info
+              state["last_known"]["last_error"] = error_info
+              # Re-save so last_error is included after the lifetime flush.
+              save_stats_state(state)
+              send_incident_log(
+                  "error",
+                  str(error),
+                  repo=config["repo"],
+                  details={
+                      "Monitor": config.get("monitor_type"),
+                      "Status": getattr(error, "status", None),
+                  },
+              )
+
+
+          def _record_stats_rate_limit(state, config, reset_epoch):
+              if state is None:
+                  return
+              _record_stats_repo_checked(state, config["repo"])
+              now = _now_epoch()
+              repo_state = _stats_repo_state(state, config["repo"])
+              _stats_set_monitor_kinds(repo_state, config.get("monitor_type"))
+              repo_state["last_status"] = "Rate Limited!"
+              repo_state["last_rate_limit"] = now
+              state["current"]["rate_limited"] = True
+              state["current"]["last_rate_limit"] = now
+              state["last_known"]["last_rate_limit"] = now
+              state["last_known"]["last_rate_limit_reset"] = reset_epoch
+              reset_text = (
+                  _discord_timestamp(reset_epoch, "f") if reset_epoch else "unknown"
+              )
+              send_incident_log(
+                  "rate_limit",
+                  "GitHub primary API rate limit exhausted while monitoring this repository. "
+                  "Remaining repos in this run may be skipped.",
+                  repo=config["repo"],
+                  details={
+                      "Monitor": config.get("monitor_type"),
+                      "Resets": reset_text,
+                  },
+              )
+
+
+          def _discord_timestamp(epoch, style="t"):
+              try:
+                  if epoch is None:
+                      return "Unknown"
+                  return f"<t:{int(epoch)}:{style}>"
+              except (TypeError, ValueError, OverflowError):
+                  return "Unknown"
+
+
+          def _stats_commit_version(commit_info):
+              """Version string from a stored commit stats payload, if any."""
+              if not isinstance(commit_info, dict):
+                  return ""
+              version = str(commit_info.get("version") or "").strip()
+              if version and version.lower() != "unknown":
+                  return version
+              message = str(commit_info.get("message") or "")
+              if message:
+                  extracted = extract_update_version(message)
+                  if extracted and extracted.lower() != "unknown":
+                      return extracted
+              return ""
+
+
+          def _stats_markdown_link(label, url):
+              """Return a Discord markdown link, or plain label when url is missing."""
+              text = str(label or "").strip() or "Unknown"
+              href = str(url or "").strip()
+              if not href:
+                  return text
+              safe_label = text.replace("[", "(").replace("]", ")")
+              return f"[{safe_label}]({href})"
+
+
+          def _stats_last_commit_text(repo_state, repo_full_name=""):
+              """Human-readable last-commit line with an optional masked GitHub link."""
+              commit = repo_state.get("last_detected_commit") or repo_state.get("last_seen_commit")
+              if not isinstance(commit, dict):
+                  return "None yet"
+              version = _stats_commit_version(commit)
+              sha = str(commit.get("sha") or "").strip()
+              short_sha = sha[:7] if sha else ""
+              message = str(commit.get("message") or "").strip()
+              if version:
+                  label = version
+              elif short_sha:
+                  label = short_sha
+              elif message:
+                  label = message[:48] + ("…" if len(message) > 48 else "")
+              else:
+                  label = "Unknown"
+              url = str(commit.get("url") or "").strip()
+              if not url and sha and repo_full_name:
+                  url = f"https://github.com/{repo_full_name}/commit/{sha}"
+              linked = _stats_markdown_link(label, url)
+              committed = commit.get("committed_at_epoch")
+              if committed:
+                  return f"{linked} · {_discord_timestamp(committed, 'f')}"
+              return linked
+
+
+          def _stats_last_release_text(repo_state, repo_full_name=""):
+              """Human-readable last-release line with an optional masked GitHub link.
+
+              Never falls back to commit versions so commit-only repos can show Last Commit instead.
+              """
+              release = repo_state.get("last_detected_release") or repo_state.get("last_seen_release")
+              if not isinstance(release, dict):
+                  return "None yet"
+              tag = str(release.get("tag") or "Unknown")
+              url = str(release.get("url") or "").strip()
+              if not url and tag and tag != "Unknown" and repo_full_name:
+                  url = f"https://github.com/{repo_full_name}/releases/tag/{tag}"
+              linked = _stats_markdown_link(tag, url)
+              published = release.get("published_at_epoch") or release.get("created_at_epoch")
+              if published:
+                  return f"{linked} · {_discord_timestamp(published, 'f')}"
+              return linked
+
+
+          def _stats_repo_status_text(repo_state):
+              status = str(repo_state.get("last_status") or "Unknown")
+              if status == "Disabled":
+                  return ":red_circle: Disabled"
+              if status == "Rate Limited!":
+                  return ":yellow_circle: Rate Limited!"
+              if status == "Error":
+                  return ":orange_circle: Error"
+              if status == "Operational":
+                  return ":green_circle: Operational"
+              return ":white_circle: Unknown"
+
+
+          def _stats_repo_status_emoji(repo_state):
+              """Compact status indicator for repository field names."""
+              status = str(repo_state.get("last_status") or "Unknown")
+              if status == "Disabled":
+                  return ":red_circle:"
+              if status == "Rate Limited!":
+                  return ":yellow_circle:"
+              if status == "Error":
+                  return ":orange_circle:"
+              if status == "Operational":
+                  return ":green_circle:"
+              return ":white_circle:"
+
+
+          def _stats_infer_monitor_kinds(repo_state):
+              """Return the set of monitor kinds for a repo, inferring from history when needed."""
+              monitor_kinds = set(repo_state.get("monitor_kinds") or [])
+              if monitor_kinds:
+                  return monitor_kinds
+              commits_n = int(repo_state.get("commits_detected", 0) or 0)
+              releases_n = int(repo_state.get("releases_detected", 0) or 0)
+              if (
+                  commits_n
+                  or repo_state.get("last_detected_commit")
+                  or repo_state.get("last_seen_commit")
+              ):
+                  monitor_kinds.add("commits")
+              if (
+                  releases_n
+                  or repo_state.get("last_detected_release")
+                  or repo_state.get("last_seen_release")
+              ):
+                  monitor_kinds.add("releases")
+              return monitor_kinds
+
+
+          def _stats_repo_display_labels(repo_keys):
+              """Map full owner/repo → display label (short name, or full on collision)."""
+              short_counts = {}
+              for repo in repo_keys:
+                  short = str(repo).rsplit("/", 1)[-1]
+                  key = short.casefold()
+                  short_counts[key] = short_counts.get(key, 0) + 1
+              labels = {}
+              for repo in repo_keys:
+                  short = str(repo).rsplit("/", 1)[-1]
+                  if short_counts.get(short.casefold(), 0) > 1:
+                      labels[repo] = str(repo)
+                  else:
+                      labels[repo] = short
+              return labels
+
+
+          def _fit_stats_text(text, limit=4096):
+              """Trim text to a Discord embed description/field budget."""
+              if len(text) <= limit:
+                  return text
+              suffix = "\n\n_Stats panel shortened to fit Discord's limit._"
+              return text[: max(0, limit - len(suffix))] + suffix
+
+
+          def _stats_embed(description=None, fields=None, color=None):
+              embed = {"color": int(color if color is not None else DEFAULT_COMMIT_ACCENT_COLOR)}
+              if description is not None:
+                  embed["description"] = _fit_stats_text(str(description), 4096)
+              if fields:
+                  embed["fields"] = fields[:25]
+              return embed
+
+
+          def _render_stats_embeds(state):
+              """Build the Discord stats dashboard as one classic embed (no Components V2, no ping).
+
+              Single-embed layout:
+                description: Header + This Run + Lifetime + Repository Activity heading
+                fields: one inline field per repo (short name unless collision)
+              Incidents are posted as separate messages to incident_webhook, not in this embed.
+              """
+              current = state["current"]
+              lifetime = state["lifetime"]
+              repos = state["repositories"]
+              last_known = state.get("last_known") or {}
+              accent = DEFAULT_COMMIT_ACCENT_COLOR
+
+              if current.get("rate_limited"):
+                  status_line = ":yellow_circle: Rate Limited!"
+                  last_reset = last_known.get("last_rate_limit_reset")
+                  if last_reset:
+                      status_line = f":yellow_circle: Rate Limited! · resets {_discord_timestamp(last_reset, 'T')}"
+              elif current.get("errors", 0):
+                  error_count = int(current.get("errors", 0) or 0)
+                  status_line = (
+                      f":orange_circle: {error_count} error{'s' if error_count != 1 else ''} this run"
+                  )
+              else:
+                  status_line = ":green_circle: Operational"
+
+              description_parts = [
+                  "# Repo Monitor",
+                  status_line,
+                  "",
+                  f"Last check · {_discord_timestamp(current.get('last_check'), 'T')}",
+                  f"Next check · {_discord_timestamp(current.get('next_check'), 'R')}",
+                  f"Repos checked · {current.get('repos_checked', 0)}/{current.get('repos_total', 0)}",
+              ]
+              rl_remaining = last_known.get("github_rate_limit_remaining")
+              rl_limit = last_known.get("github_rate_limit_limit")
+              rl_reset = last_known.get("github_rate_limit_reset")
+              if rl_remaining is not None or rl_limit is not None:
+                  try:
+                      remaining_text = f"{int(rl_remaining):,}" if rl_remaining is not None else "?"
+                  except (TypeError, ValueError):
+                      remaining_text = str(rl_remaining)
+                  try:
+                      limit_text = f"{int(rl_limit):,}" if rl_limit is not None else "?"
+                  except (TypeError, ValueError):
+                      limit_text = str(rl_limit)
+                  budget_line = f"GitHub API · {remaining_text} / {limit_text} remaining"
+                  if rl_reset:
+                      budget_line += f" · resets {_discord_timestamp(rl_reset, 'T')}"
+                  description_parts.append(budget_line)
+
+              run_commits = int(current.get("new_commits", 0) or 0)
+              run_releases = int(current.get("new_releases", 0) or 0)
+              run_notifs = int(current.get("notifications", 0) or 0)
+              run_errors = int(current.get("errors", 0) or 0)
+              run_forum = int(current.get("forum_posts", 0) or 0)
+              this_run_parts = [
+                  f"{run_commits} commit{'s' if run_commits != 1 else ''}",
+                  f"{run_releases} release{'s' if run_releases != 1 else ''}",
+                  f"{run_notifs} notification{'s' if run_notifs != 1 else ''}",
+              ]
+              if run_forum:
+                  this_run_parts.append(f"{run_forum} forum post{'s' if run_forum != 1 else ''}")
+              if run_errors:
+                  this_run_parts.append(f"{run_errors} error{'s' if run_errors != 1 else ''}")
+              description_parts.extend([
+                  "",
+                  "# This Run",
+                  " · ".join(this_run_parts),
+              ])
+
+              description_parts.extend([
+                  "",
+                  "# Lifetime",
+                  f"Runs: {int(lifetime.get('runs', 0) or 0):,}",
+                  f"Commits detected: {int(lifetime.get('commits_detected', 0) or 0):,}",
+                  f"Releases detected: {int(lifetime.get('releases_detected', 0) or 0):,}",
+                  f"Notifications: {int(lifetime.get('discord_notifications', 0) or 0):,}",
+              ])
+              lifetime_forum = int(lifetime.get("forum_posts", 0) or 0)
+              if lifetime_forum:
+                  description_parts.append(f"Forum posts: {lifetime_forum:,}")
+              description_parts.append(f"Errors: {int(lifetime.get('errors', 0) or 0):,}")
+              created_at = state.get("created_at")
+              if created_at:
+                  description_parts.append(f"Tracking since: {_discord_timestamp(created_at, 'D')}")
+
+              sorted_repos = sorted(repos.items(), key=lambda item: item[0].casefold())
+              display_labels = _stats_repo_display_labels([repo for repo, _ in sorted_repos])
+              max_repo_fields = 25
+              description_parts.extend(["", "# Repository Activity"])
+              if len(sorted_repos) > max_repo_fields:
+                  description_parts.append(
+                      f"_Showing {max_repo_fields} of {len(sorted_repos)} repositories._"
+                  )
+
+              repo_fields = []
+              for repo, repo_state in sorted_repos[:max_repo_fields]:
+                  commits_n = int(repo_state.get("commits_detected", 0) or 0)
+                  releases_n = int(repo_state.get("releases_detected", 0) or 0)
+                  notifs_n = int(repo_state.get("notifications", 0) or 0)
+                  forum_n = int(repo_state.get("forum_posts", 0) or 0)
+                  monitor_kinds = _stats_infer_monitor_kinds(repo_state)
+                  status_emoji = _stats_repo_status_emoji(repo_state)
+                  status_name = str(repo_state.get("last_status") or "Unknown")
+                  label = display_labels.get(repo, repo.rsplit("/", 1)[-1])
+
+                  value_lines = []
+                  if "commits" in monitor_kinds:
+                      value_lines.append(f"- Commits detected: {commits_n:,}")
+                  if "releases" in monitor_kinds:
+                      value_lines.append(f"- Releases detected: {releases_n:,}")
+                  value_lines.append(f"- Notifications: {notifs_n:,}")
+                  if forum_n:
+                      value_lines.append(f"- Forum posts: {forum_n:,}")
+                  last_check = repo_state.get("last_successful_check")
+                  value_lines.append(
+                      f"- Last check: {_discord_timestamp(last_check, 'T') if last_check else 'Unknown'}"
+                  )
+                  if "commits" in monitor_kinds:
+                      value_lines.append(
+                          f"- Last commit: {_stats_last_commit_text(repo_state, repo)}"
+                      )
+                  if "releases" in monitor_kinds:
+                      value_lines.append(
+                          f"- Last release: {_stats_last_release_text(repo_state, repo)}"
+                      )
+                  if status_name == "Error" and repo_state.get("last_error"):
+                      error_text = str(repo_state.get("last_error")).replace("`", "'").replace("\n", " ")
+                      if len(error_text) > 140:
+                          error_text = error_text[:137] + "…"
+                      value_lines.append(f"- Last error: {error_text}")
+
+                  field_name = f"{label}  {status_emoji}"
+                  if len(field_name) > 256:
+                      field_name = field_name[:253] + "…"
+                  repo_fields.append(
+                      {
+                          "name": field_name,
+                          "value": _fit_stats_text("\n".join(value_lines), 1024),
+                          "inline": True,
+                      }
+                  )
+
+              return [
+                  _stats_embed(
+                      description="\n".join(description_parts),
+                      fields=repo_fields,
+                      color=accent,
+                  )
+              ]
+
+
+          def _stats_webhook_url(message_id=None, wait=False):
+              parsed = urlparse(STATS_WEBHOOK)
+              query_params = [
+                  (key, value)
+                  for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                  if key not in {"wait", "with_components", "thread_id"}
+              ]
+              if wait:
+                  query_params.append(("wait", "true"))
+              path = parsed.path.rstrip("/")
+              if message_id:
+                  path += f"/messages/{message_id}"
+              return urlunparse(parsed._replace(path=path, query=urlencode(query_params)))
+
+
+          def _stats_dashboard_payload(embeds):
+              """Classic embed payload: no Components V2 flags, no content ping."""
+              return {
+                  "content": "",
+                  "embeds": embeds,
+                  "components": [],
+                  "allowed_mentions": {},
+              }
+
+
+          def _post_stats_dashboard(embeds):
+              body = json.dumps(_stats_dashboard_payload(embeds)).encode("utf-8")
+              url = _stats_webhook_url(wait=True)
+
+              def build_request():
+                  return urllib.request.Request(
+                      url,
+                      data=body,
+                      headers={
+                          "Content-Type": "application/json",
+                          "User-Agent": "GitHub-Discord-Monitor/1.0",
+                      },
+                      method="POST",
+                  )
+
+              response_body = fetch_with_retry(build_request, service="discord")
+              return json.loads(response_body) if response_body else {}
+
+
+          def _edit_stats_dashboard(message_id, embeds):
+              body = json.dumps(_stats_dashboard_payload(embeds)).encode("utf-8")
+              url = _stats_webhook_url(message_id=message_id)
+
+              def build_request():
+                  return urllib.request.Request(
+                      url,
+                      data=body,
+                      headers={
+                          "Content-Type": "application/json",
+                          "User-Agent": "GitHub-Discord-Monitor/1.0",
+                      },
+                      method="PATCH",
+                  )
+
+              response_body = fetch_with_retry(build_request, service="discord")
+              return json.loads(response_body) if response_body else {}
+
+
+          def update_stats_dashboard(state):
+              if not STATS_ENABLED or state is None:
+                  return False
+              embeds = _render_stats_embeds(state)
+              message_id = str(state.get("message_id") or "").strip()
+              last_check = state.get("current", {}).get("last_check")
+              print(
+                  f"Updating stats dashboard (message_id={message_id or 'none'}, "
+                  f"last_check={last_check}, "
+                  f"last_check_discord={_discord_timestamp(last_check, 't')}, "
+                  f"embeds={len(embeds)})."
+              )
+
+              last_sent = _last_discord_send_at["t"]
+              if last_sent is not None:
+                  elapsed = time.monotonic() - last_sent
+                  if elapsed < DISCORD_SEND_DELAY_SECONDS:
+                      time.sleep(DISCORD_SEND_DELAY_SECONDS - elapsed)
+
+              def _mark_updated(msg_id):
+                  state["last_known"].pop("stats_dashboard_error", None)
+                  state["message_id"] = str(msg_id)
+                  state["message_updated_at"] = _now_epoch()
+                  _last_discord_send_at["t"] = time.monotonic()
+
+              try:
+                  if message_id:
+                      try:
+                          response = _edit_stats_dashboard(message_id, embeds)
+                          returned_id = str(response.get("id") or "").strip() if isinstance(response, dict) else ""
+                          if returned_id and returned_id != message_id:
+                              raise RuntimeError(
+                                  f"Discord edited a different stats message ({returned_id}) than expected ({message_id})."
+                              )
+                          _mark_updated(message_id)
+                          print(f"Updated stats dashboard message {message_id}.")
+                          return True
+                      except urllib.error.HTTPError as error:
+                          error_body = _http_error_body(error)
+                          print(
+                              f"Stats dashboard edit HTTP {error.code} for message {message_id}: "
+                              f"{error_body[:500]}. Creating a replacement message."
+                          )
+                          state["message_id"] = ""
+                      except Exception as error:
+                          print(
+                              f"Stats dashboard edit failed for message {message_id}: {error}. "
+                              "Creating a replacement message."
+                          )
+                          state["message_id"] = ""
+
+                  response = _post_stats_dashboard(embeds)
+                  new_message_id = str(response.get("id") or "").strip() if isinstance(response, dict) else ""
+                  if not new_message_id:
+                      raise RuntimeError("Discord stats dashboard creation did not return a message ID.")
+                  state["message_created_at"] = _now_epoch()
+                  _mark_updated(new_message_id)
+                  print(
+                      f"Created stats dashboard message {new_message_id}. "
+                      "If an older stats message is still visible, delete it — only this ID is updated going forward."
+                  )
+                  return True
+              except urllib.error.HTTPError as error:
+                  error_body = _http_error_body(error)
+                  state["last_known"]["stats_dashboard_error"] = {
+                      "message": f"HTTP {error.code}: {error_body[:500]}",
+                      "timestamp": _now_epoch(),
+                  }
+                  print(f"Stats dashboard Discord error HTTP {error.code}: {error_body[:500]}")
+              except Exception as error:
+                  state["last_known"]["stats_dashboard_error"] = {
+                      "message": str(error),
+                      "timestamp": _now_epoch(),
+                  }
+                  print(f"Stats dashboard update failed; monitoring will continue: {error}")
+              return False
+
+
+          def _sync_github_rate_limit_into_stats(state):
+              """Copy the latest observed GitHub primary rate-limit budget into stats state."""
+              if state is None:
+                  return
+              info = GITHUB_RATE_LIMIT_INFO
+              if info.get("remaining") is None and info.get("limit") is None:
+                  return
+              last_known = state.setdefault("last_known", {})
+              if info.get("remaining") is not None:
+                  last_known["github_rate_limit_remaining"] = info["remaining"]
+              if info.get("limit") is not None:
+                  last_known["github_rate_limit_limit"] = info["limit"]
+              if info.get("reset") is not None:
+                  last_known["github_rate_limit_reset"] = info["reset"]
+              if info.get("observed_at") is not None:
+                  last_known["github_rate_limit_observed_at"] = info["observed_at"]
+
+
+          def finalize_stats_dashboard(state):
+              if state is None:
+                  return
+              state["current"].pop("_checked_repo_names", None)
+              state["current"].pop("_failed_repo_names", None)
+              _sync_github_rate_limit_into_stats(state)
+              # Re-apply high-water marks right before render so Discord never shows a
+              # lower Errors total than any durable store still holds.
+              _apply_monotonic_lifetime(state)
+              save_stats_state(state)
+              updated = update_stats_dashboard(state)
+              save_stats_state(state)
+              if not updated:
+                  print(
+                      "::warning::Stats dashboard was not updated on Discord this run. "
+                      "Check stats_webhook, that the bot/webhook can post to the channel, "
+                      "and the Actions log lines above for the Discord error body."
+                  )
+              else:
+                  print(
+                      f"Stats dashboard finalize complete "
+                      f"(message_id={state.get('message_id')}, "
+                      f"last_check={state.get('current', {}).get('last_check')})."
+                  )
+
+
           def _format_reset_time(reset_epoch):
               if not reset_epoch:
                   return "unknown"
@@ -995,6 +1944,89 @@ jobs:
                   )
                   return response
               return send_discord(components, ping_mentions)
+
+
+          def send_incident_log(kind, message, repo=None, details=None):
+              """Post a new incident-log message to the dedicated channel (never edits).
+
+              Each call creates a fresh Discord message so the channel acts as an error log.
+              No-op when incident_webhook is unset.
+              """
+              if not INCIDENT_WEBHOOK:
+                  return None
+              kind_key = str(kind or "error").strip().lower() or "error"
+              if kind_key in {"rate_limit", "rate-limited", "ratelimit"}:
+                  title = "Repo Monitor · Rate Limit"
+                  color = 0xFEE75C
+                  emoji = ":yellow_circle:"
+              elif kind_key in {"fatal", "config"}:
+                  title = "Repo Monitor · Fatal Error"
+                  color = 0xED4245
+                  emoji = ":red_circle:"
+              else:
+                  title = "Repo Monitor · Error"
+                  color = 0xED4245
+                  emoji = ":orange_circle:"
+
+              body_lines = [f"{emoji} **{title}**", ""]
+              if repo:
+                  body_lines.append(f"**Repo:** `{repo}`")
+              body_lines.append(f"**When:** {_discord_timestamp(_now_epoch(), 'f')}")
+              if details:
+                  for key, value in details.items():
+                      if value is None or value == "":
+                          continue
+                      body_lines.append(f"**{key}:** {value}")
+              clean_message = str(message or "").strip() or "Unknown error"
+              if len(clean_message) > 1500:
+                  clean_message = clean_message[:1497] + "…"
+              body_lines.extend(["", clean_message])
+
+              ping_text, ping_mentions = build_ping(INCIDENT_PING_MODE, INCIDENT_PING_ID)
+              embed = {
+                  "color": color,
+                  "description": _fit_stats_text("\n".join(body_lines), 4096),
+              }
+              payload = {
+                  "content": ping_text or "",
+                  "embeds": [embed],
+                  "allowed_mentions": ping_mentions or {},
+              }
+
+              last_sent = _last_discord_send_at["t"]
+              if last_sent is not None:
+                  elapsed = time.monotonic() - last_sent
+                  if elapsed < DISCORD_SEND_DELAY_SECONDS:
+                      time.sleep(DISCORD_SEND_DELAY_SECONDS - elapsed)
+
+              body = json.dumps(payload).encode("utf-8")
+              parsed = urlparse(INCIDENT_WEBHOOK)
+              query_params = [
+                  (key, value)
+                  for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                  if key not in {"wait", "with_components", "thread_id"}
+              ]
+              url = urlunparse(parsed._replace(query=urlencode(query_params)))
+
+              def build_request():
+                  return urllib.request.Request(
+                      url,
+                      data=body,
+                      headers={
+                          "Content-Type": "application/json",
+                          "User-Agent": "GitHub-Discord-Monitor/1.0",
+                      },
+                      method="POST",
+                  )
+
+              try:
+                  fetch_with_retry(build_request, service="discord")
+                  _last_discord_send_at["t"] = time.monotonic()
+                  print(f"Posted incident log message ({kind_key}) to incident_webhook.")
+                  return True
+              except Exception as error:
+                  print(f"Could not post incident log message: {error}")
+                  return False
           
           
           def record_repo_failure(config, error, permanent=False):
@@ -1019,8 +2051,6 @@ jobs:
                       "issue_fingerprint": issue_fingerprint,
                   })
           
-                  # Permanent failures are immediate, and this state is shared across commit/release
-                  # monitoring so a repo with monitor=both does not get duplicate 404/401/403 alerts.
                   if not bool(state.get("alert_sent", False)):
                       reason = (
                           f"{service} returned a permanent HTTP error while monitoring `{config['repo']}`: {error_text}. "
@@ -1093,7 +2123,7 @@ jobs:
                       "GitHub's primary REST API rate limit has been exhausted for this monitor. "
                       f"It has affected {consecutive} consecutive workflow runs. "
                       f"GitHub reports the rate-limit reset at {reset_text}. "
-                      "The monitor skipped the remaining repositories in the affected run and will retry on the next scheduled run."
+                      "The monitor skipped the remaining repositories in the affected run and will retry on the next run."
                   )
                   try:
                       send_failure_alert(config, message)
@@ -1137,8 +2167,6 @@ jobs:
               STATE = state_path_for_repo(REPO)
               THREAD_STATE = thread_state_path_for_repo(REPO)
               DELIVERY_STATE = delivery_state_path_for_repo(REPO)
-              # A repo type switch makes the old delivery mechanism inapplicable. Clear the
-              # unrelated resume state so a later config change cannot resurrect stale progress.
               if CURRENT_REPO_TYPE == "forum":
                   _clear_json_state(DELIVERY_STATE)
               else:
@@ -1171,10 +2199,44 @@ jobs:
                   or "abuse detection" in message
                   or "too many requests" in message
               )
+
+
+          def _record_github_rate_limit_headers(headers):
+              """Update the process-wide primary rate-limit budget from GitHub response headers."""
+              if not headers:
+                  return
+              remaining_raw = headers.get("X-RateLimit-Remaining")
+              limit_raw = headers.get("X-RateLimit-Limit")
+              reset_raw = headers.get("X-RateLimit-Reset")
+              with _github_rate_limit_lock:
+                  updated = False
+                  if remaining_raw is not None and str(remaining_raw).strip() != "":
+                      try:
+                          GITHUB_RATE_LIMIT_INFO["remaining"] = int(str(remaining_raw).strip())
+                          updated = True
+                      except (TypeError, ValueError):
+                          pass
+                  if limit_raw is not None and str(limit_raw).strip() != "":
+                      try:
+                          GITHUB_RATE_LIMIT_INFO["limit"] = int(str(limit_raw).strip())
+                          updated = True
+                      except (TypeError, ValueError):
+                          pass
+                  if reset_raw is not None and str(reset_raw).strip() != "":
+                      try:
+                          GITHUB_RATE_LIMIT_INFO["reset"] = int(str(reset_raw).strip())
+                          updated = True
+                      except (TypeError, ValueError):
+                          pass
+                  if updated:
+                      GITHUB_RATE_LIMIT_INFO["observed_at"] = _now_epoch()
           
           
-          def fetch_with_retry(request_factory, service="generic"):
-              """Retry transient failures and classify GitHub primary/secondary rate limits explicitly."""
+          def fetch_with_retry(request_factory, service="generic", return_headers=False):
+              """Retry transient failures and classify GitHub primary/secondary rate limits explicitly.
+
+              When return_headers is True, returns (body_bytes, headers) instead of body_bytes.
+              """
               network_attempt = 0
               transient_http_attempt = 0
               rate_limit_attempt = 0
@@ -1184,14 +2246,23 @@ jobs:
                   try:
                       req = request_factory()
                       with urllib.request.urlopen(req, timeout=30) as response:
-                          return response.read()
+                          if service == "github":
+                              _record_github_rate_limit_headers(response.headers)
+                          body = response.read()
+                          if return_headers:
+                              return body, response.headers
+                          return body
                   except urllib.error.HTTPError as error:
                       headers = error.headers or {}
                       body_text = ""
-                      if service == "github" and error.code in {403, 429}:
-                          body_text = _http_error_body(error)
+                      if service == "github" and error.code in {403, 429, 304}:
+                          if error.code in {403, 429}:
+                              body_text = _http_error_body(error)
           
                       if service == "github":
+                          _record_github_rate_limit_headers(headers)
+                          if error.code == 304:
+                              raise GitHubNotModified() from error
                           remaining = headers.get("X-RateLimit-Remaining")
                           reset = headers.get("X-RateLimit-Reset")
                           remaining_is_zero = str(remaining).strip() == "0"
@@ -1293,30 +2364,81 @@ jobs:
                           raise
           
           
-          def get_recent_commits(max_pages=1):
-              """Fetch commits from the most recent GitHub API page."""
+          def _github_request_headers(etag=None, last_modified=None):
+              headers = {
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "GitHub-Discord-Monitor/1.0",
+                  "X-GitHub-Api-Version": "2022-11-28",
+              }
+              if GITHUB_TOKEN:
+                  headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+              if etag:
+                  headers["If-None-Match"] = etag
+              if last_modified:
+                  headers["If-Modified-Since"] = last_modified
+              return headers
+
+
+          def _header_value(headers, name):
+              if not headers:
+                  return None
+              value = headers.get(name)
+              if value is None:
+                  for key, candidate in headers.items():
+                      if str(key).lower() == name.lower():
+                          value = candidate
+                          break
+              text = str(value or "").strip()
+              return text or None
+
+
+          def get_recent_commits(max_pages=1, etag=None, last_modified=None):
+              """Fetch commits from the most recent GitHub API page.
+
+              Supports conditional requests via ETag / Last-Modified. On HTTP 304,
+              raises GitHubNotModified. Returns (commits, new_etag, new_last_modified).
+              """
+              cache_key = (REPO, "commit")
+              cached = PREFETCH_CACHE.pop(cache_key, None)
+              if cached is not None:
+                  status = cached[0]
+                  if status == "not_modified":
+                      raise GitHubNotModified()
+                  if status == "error":
+                      raise cached[1]
+                  commits, new_etag, new_last_modified = cached[1], cached[2], cached[3]
+                  save_etag_state(REPO, "commit", new_etag, new_last_modified)
+                  return commits
+
               commits = []
+              new_etag = etag
+              new_last_modified = last_modified
               for page in range(1, max_pages + 1):
                   separator = "&" if "?" in API_URL else "?"
                   page_url = f"{API_URL}{separator}page={page}"
-          
-                  def build_request():
-                      headers = {
-                          "Accept": "application/vnd.github+json",
-                          "User-Agent": "GitHub-Discord-Monitor/1.0",
-                          "X-GitHub-Api-Version": "2022-11-28",
-                      }
-                      if GITHUB_TOKEN:
-                          headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-                      return urllib.request.Request(page_url, headers=headers)
-          
-                  body = fetch_with_retry(build_request, service="github")
+                  page_etag = etag if page == 1 else None
+                  page_last_modified = last_modified if page == 1 else None
+
+                  def build_request(url=page_url, req_etag=page_etag, req_lm=page_last_modified):
+                      return urllib.request.Request(
+                          url, headers=_github_request_headers(req_etag, req_lm)
+                      )
+
+                  body, resp_headers = fetch_with_retry(
+                      build_request, service="github", return_headers=True
+                  )
+                  if page == 1:
+                      new_etag = _header_value(resp_headers, "ETag") or new_etag
+                      new_last_modified = (
+                          _header_value(resp_headers, "Last-Modified") or new_last_modified
+                      )
                   batch = json.loads(body)
                   if not batch:
                       break
                   commits.extend(batch)
                   if len(batch) < 100:
                       break
+              save_etag_state(REPO, "commit", new_etag, new_last_modified)
               return commits
           
           
@@ -1331,67 +2453,123 @@ jobs:
               return "", {}
           
           
-          def maybe_send_inactivity_reminder():
-              """Send exactly one reminder per 59-day inactivity cycle and cache that fact."""
-              output_path = os.environ.get("GITHUB_OUTPUT")
-              if output_path:
-                  with open(output_path, "a", encoding="utf-8") as output:
-                      output.write("reminder_sent=false\n")
-          
-              eligible = os.environ.get("REMINDER_ELIGIBLE", "").strip().lower() == "true"
-              cache_hit = os.environ.get("REMINDER_CACHE_HIT", "").strip().lower() == "true"
-              if not eligible or cache_hit:
-                  return
-          
-              ping_text, ping_mentions = build_ping(DEFAULT_PING_MODE, DEFAULT_PING_ID)
-              title = "## Workflow Re-enable Reminder"
-              body = (
-                  "**Action Required:** Re-enable this workflow **the day after this message is sent**.\n\n"
-                  "This repository has been inactive for 59 days, and GitHub may automatically disable scheduled workflows after 60 days without repository activity.\n\n"
-                  "**Please re-enable this workflow tomorrow to prevent the monitoring system from being disabled.**\n\n"
-                  "No action is required today. **The workflow should be re-enabled the day after this reminder is sent.**"
-              )
-          
-              components = []
-              if ping_text:
-                  components.append({"type": 10, "content": ping_text})
-              components.append(make_container([
-                  {"type": 10, "content": title},
-                  {"type": 14, "spacing": 1},
-                  {"type": 10, "content": body},
-              ], DEFAULT_INACTIVITY_ACCENT_COLOR))
-          
-              global CURRENT_WEBHOOK
-              previous_webhook = CURRENT_WEBHOOK
-              if not DEFAULT_WEBHOOK:
-                  print("Skipping inactivity reminder because no global webhook is configured. Per-repository webhooks are not used for workflow-level reminders.")
-                  return
-              CURRENT_WEBHOOK = DEFAULT_WEBHOOK
+
+          def _webhook_fingerprint(webhook_url=None):
+              value = (webhook_url if webhook_url is not None else CURRENT_WEBHOOK) or ""
+              return hashlib.sha256(value.encode("utf-8")).hexdigest() if value else ""
+
+
+          def release_content_fingerprint(release):
+              """Fingerprint a release's body and assets so later edits can be detected."""
+              assets = release.get("assets") or []
+              asset_sig = []
+              for asset in assets:
+                  if not isinstance(asset, dict):
+                      continue
+                  asset_sig.append(
+                      {
+                          "id": asset.get("id"),
+                          "name": str(asset.get("name") or ""),
+                          "size": asset.get("size"),
+                          "updated_at": str(asset.get("updated_at") or ""),
+                          "browser_download_url": str(asset.get("browser_download_url") or ""),
+                      }
+                  )
+              asset_sig.sort(key=lambda item: (str(item.get("id") or ""), str(item.get("name") or "")))
+              payload = {
+                  "tag": str(release.get("tag_name") or "").strip(),
+                  "name": str(release.get("name") or "").strip(),
+                  "body": str(release.get("body") or ""),
+                  "assets": asset_sig,
+              }
+              raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+              return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+          def load_release_notify_state(repo):
+              path = release_notify_state_path_for_repo(repo)
+              return _load_json_state(path)
+
+
+          def save_release_notify_state(repo, tag, fingerprint, message_ids, thread_id=None, webhook_fingerprint=None):
+              """Overwrite notify state for this repo. Always represents only the newest release."""
+              path = release_notify_state_path_for_repo(repo)
+              data = {
+                  "tag": str(tag or "").strip(),
+                  "fingerprint": str(fingerprint or "").strip(),
+                  "message_ids": [str(mid).strip() for mid in (message_ids or []) if str(mid).strip()],
+                  "thread_id": str(thread_id).strip() if thread_id else None,
+                  "webhook_fingerprint": webhook_fingerprint if webhook_fingerprint is not None else _webhook_fingerprint(),
+              }
+              _save_json_state(path, data)
+
+
+          def edit_discord_message(message_id, components, allowed_mentions=None, thread_id=None):
+              """Edit a previously posted webhook message. Returns the Discord response body."""
+              last_sent = _last_discord_send_at["t"]
+              if last_sent is not None:
+                  elapsed = time.monotonic() - last_sent
+                  if elapsed < DISCORD_SEND_DELAY_SECONDS:
+                      time.sleep(DISCORD_SEND_DELAY_SECONDS - elapsed)
+
+              if not CURRENT_WEBHOOK:
+                  raise RuntimeError(f"No Discord webhook was resolved for {REPO or 'the current workflow'}.")
+              if not message_id:
+                  raise ValueError("edit_discord_message requires a message_id.")
+
+              parsed_webhook = urlparse(CURRENT_WEBHOOK)
+              query_params = [
+                  (key, value)
+                  for key, value in parse_qsl(parsed_webhook.query, keep_blank_values=True)
+                  if key not in {"wait", "with_components", "thread_id"}
+              ]
+              query_params.append(("with_components", "true"))
+              if thread_id:
+                  query_params.append(("thread_id", str(thread_id)))
+              path = parsed_webhook.path.rstrip("/") + f"/messages/{message_id}"
+              url = urlunparse(parsed_webhook._replace(path=path, query=urlencode(query_params)))
+
+              payload = {
+                  "flags": 32768,
+                  "allowed_mentions": allowed_mentions or {},
+                  "components": components,
+              }
+              body = json.dumps(payload).encode("utf-8")
+
+              def build_request():
+                  return urllib.request.Request(
+                      url,
+                      data=body,
+                      headers={
+                          "Content-Type": "application/json",
+                          "User-Agent": "GitHub-Discord-Monitor/1.0",
+                      },
+                      method="PATCH",
+                  )
+
               try:
-                  if INACTIVITY_FORUM:
-                      response = send_discord(
-                          components,
-                          ping_mentions,
-                          thread_name=make_forum_title("Workflow Re-enable Reminder"),
-                      )
-                      if response and response.get("channel_id"):
-                          print(f"Created inactivity reminder Forum post/thread {response.get('channel_id')}.")
-                  else:
-                      send_discord(components, ping_mentions)
-                      print("Sent inactivity reminder.")
+                  response_body = fetch_with_retry(build_request, service="discord")
+                  return json.loads(response_body) if response_body else {}
+              except urllib.error.HTTPError as error:
+                  error_body = _http_error_body(error)
+                  print(f"Discord edit error HTTP {error.code}: {error_body}")
+                  if error.code == 404:
+                      raise DiscordThreadGoneError(
+                          404,
+                          f"Discord message {message_id} no longer exists or is not editable by this webhook.",
+                      ) from error
+                  if error.code in {401, 403}:
+                      raise DiscordPermanentError(
+                          error.code,
+                          f"Discord webhook returned HTTP {error.code} while editing message {message_id}. "
+                          f"Response: {error_body[:500]}",
+                      ) from error
+                  raise
               finally:
-                  CURRENT_WEBHOOK = previous_webhook
-          
-              marker = Path(os.environ["REMINDER_CACHE_MARKER"])
-              marker.parent.mkdir(parents=True, exist_ok=True)
-              marker.write_text("reminded\n", encoding="utf-8")
-          
-              if output_path:
-                  with open(output_path, "a", encoding="utf-8") as output:
-                      output.write("reminder_sent=true\n")
-          
+                  _last_discord_send_at["t"] = time.monotonic()
+
+
           def send_discord(components, allowed_mentions=None, thread_name=None, thread_id=None, applied_tags=None):
-              # Throttle sends to avoid tripping Discord's rate limit.
               last_sent = _last_discord_send_at["t"]
               if last_sent is not None:
                   elapsed = time.monotonic() - last_sent
@@ -1424,7 +2602,6 @@ jobs:
                   "components": components,
               }
           
-              # Forum-channel webhooks require thread_name when creating a new post.
               if thread_name:
                   payload["thread_name"] = thread_name
                   if applied_tags:
@@ -1448,7 +2625,7 @@ jobs:
                   response_body = fetch_with_retry(build_request, service="discord")
                   return json.loads(response_body) if response_body else {}
               except urllib.error.HTTPError as error:
-                  error_body = error.read().decode("utf-8", errors="replace")
+                  error_body = _http_error_body(error)
                   print(f"Discord error HTTP {error.code}: {error_body}")
                   if error.code == 404 and thread_id:
                       raise DiscordThreadGoneError(404, f"Discord Forum thread {thread_id} no longer exists.") from error
@@ -1463,7 +2640,6 @@ jobs:
           
           
           def make_forum_title(title):
-              # Discord forum post titles have a 100-character maximum.
               title = re.sub(r"\s+", " ", title).strip()
               return title[:100].rstrip()
           
@@ -1605,9 +2781,8 @@ jobs:
                   pass
           
           
-          # Convert bare "#123" refs and bare issue/PR URLs into real links (Discord doesn't auto-link either).
           ISSUE_REF_PATTERN = re.compile(r"(?<![\[\w/#])#(\d+)(?!\w)")
-          ISSUE_URL_PATTERN = re.compile(r"a^b")  # replaced by configure_repository() before linkification
+          ISSUE_URL_PATTERN = re.compile(r"a^b")
           
           
           def linkify_issue_refs(text):
@@ -1858,7 +3033,7 @@ jobs:
               """Pack text into Discord messages (lists of ("text", str)/("sep", None) pieces) under Discord's per-message limits."""
               atom_capacity = max(min(first_text_capacity, rest_text_capacity), MIN_CHUNK)
           
-              atoms = []  # (text, starts_a_new_heading_section)
+              atoms = []
               for line in text.split("\n"):
                   pieces = split_long_line(line, atom_capacity)
                   heading = is_heading_line(line)
@@ -1895,7 +3070,7 @@ jobs:
               for atom_text, starts_heading in atoms:
                   if starts_heading and not first_atom:
                       pending_close_cost = 1 if current_text else 0
-                      projected_components = msg_component_count + pending_close_cost + 1  # +1 for the separator
+                      projected_components = msg_component_count + pending_close_cost + 1
                       if (msg_text_len + len(atom_text) > text_capacity
                               or projected_components > component_capacity):
                           close_message()
@@ -2017,7 +3192,7 @@ jobs:
               ping_text, ping_mentions = build_ping(ping_mode, ping_id) if ping else ("", {})
           
               changelog_heading = "## Change Log:"
-              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(changelog_heading) + 1  # newline after the heading prefix
+              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(changelog_heading) + 1
               first_text_capacity = TOTAL_MESSAGE_BUDGET - first_overhead
               rest_text_capacity = TOTAL_MESSAGE_BUDGET - CONTINUATION_LABEL_OVERHEAD
               first_component_capacity = MAX_TOTAL_COMPONENTS - FIRST_FIXED_COMPONENTS
@@ -2160,51 +3335,79 @@ jobs:
           
               clear_thread_progress()
           
-          def get_recent_releases():
+          def get_recent_releases(etag=None, last_modified=None):
+              """Fetch published non-prerelease releases.
+
+              Supports conditional requests via ETag / Last-Modified. On HTTP 304,
+              raises GitHubNotModified.
+              """
+              cache_key = (REPO, "release")
+              cached = PREFETCH_CACHE.pop(cache_key, None)
+              if cached is not None:
+                  status = cached[0]
+                  if status == "not_modified":
+                      raise GitHubNotModified()
+                  if status == "error":
+                      raise cached[1]
+                  releases, new_etag, new_last_modified = cached[1], cached[2], cached[3]
+                  save_etag_state(REPO, "release", new_etag, new_last_modified)
+                  return releases
+
               def build_request():
-                  headers = {
-                      "Accept": "application/vnd.github+json",
-                      "User-Agent": "GitHub-Discord-Monitor/1.0",
-                      "X-GitHub-Api-Version": "2022-11-28",
-                  }
-                  if GITHUB_TOKEN:
-                      headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
-                  return urllib.request.Request(API_URL, headers=headers)
-          
-              body = fetch_with_retry(build_request, service="github")
-              releases = json.loads(body)  # newest first
-              # Mirror /releases/latest semantics: exclude drafts and prereleases, and ignore
-              # malformed release objects without a usable tag because the tag is the state key.
-              return [
+                  return urllib.request.Request(
+                      API_URL, headers=_github_request_headers(etag, last_modified)
+                  )
+
+              body, resp_headers = fetch_with_retry(
+                  build_request, service="github", return_headers=True
+              )
+              new_etag = _header_value(resp_headers, "ETag") or etag
+              new_last_modified = _header_value(resp_headers, "Last-Modified") or last_modified
+              releases = json.loads(body)
+              filtered = [
                   r for r in releases
                   if not r.get("draft")
                   and not r.get("prerelease")
                   and str(r.get("tag_name") or "").strip()
               ]
+              save_etag_state(REPO, "release", new_etag, new_last_modified)
+              return filtered
           
-          def format_file_size(size_bytes):
-              """Format a byte count as a compact human-readable size (B / KB / MB / GB)."""
+          def _format_bytes(num_bytes):
+              """Format a byte count as a short human-readable size (e.g. 42.1 MB)."""
               try:
-                  size = int(size_bytes)
+                  value = int(num_bytes)
               except (TypeError, ValueError):
-                  return None
-              if size < 0:
-                  return None
-              if size < 1024:
-                  return f"{size} B"
-              if size < 1024 * 1024:
-                  value = size / 1024
-                  text = f"{value:.1f}".rstrip("0").rstrip(".")
-                  return f"{text} KB"
-              if size < 1024 * 1024 * 1024:
-                  value = size / (1024 * 1024)
-                  text = f"{value:.1f}".rstrip("0").rstrip(".")
-                  return f"{text} MB"
-              value = size / (1024 * 1024 * 1024)
-              text = f"{value:.2f}".rstrip("0").rstrip(".")
-              return f"{text} GB"
-          
-          
+                  return ""
+              if value < 0:
+                  return ""
+              units = ["B", "KB", "MB", "GB", "TB"]
+              size = float(value)
+              unit_index = 0
+              while size >= 1024 and unit_index < len(units) - 1:
+                  size /= 1024.0
+                  unit_index += 1
+              if unit_index == 0:
+                  return f"{int(size)} {units[unit_index]}"
+              if size >= 100 or abs(size - round(size)) < 0.05:
+                  return f"{size:.0f} {units[unit_index]}"
+              return f"{size:.1f} {units[unit_index]}"
+
+
+          def _format_release_asset_line(asset):
+              """One markdown bullet for a release asset, including size when known."""
+              if not isinstance(asset, dict):
+                  return ""
+              name = str(asset.get("name") or "").strip()
+              download_url = str(asset.get("browser_download_url") or "").strip()
+              if not name or not download_url:
+                  return ""
+              size_text = _format_bytes(asset.get("size"))
+              if size_text:
+                  return f"- [{name}]({download_url}) ({size_text})"
+              return f"- [{name}]({download_url})"
+
+
           def release_meta(release):
               tag = str(release.get("tag_name") or "").strip()
               release_url = str(release.get("html_url") or "").strip()
@@ -2228,20 +3431,9 @@ jobs:
                   assets = release.get("assets") or []
                   asset_lines = []
                   for asset in assets:
-                      name = str(asset.get("name") or "").strip()
-                      download_url = str(asset.get("browser_download_url") or "").strip()
-                      if not name or not download_url:
-                          continue
-                      size_text = format_file_size(asset.get("size"))
-                      content_type = str(asset.get("content_type") or "").strip()
-                      # Prefer a compact size summary; fall back to content type when size is missing.
-                      if size_text:
-                          label = f"{name} ({size_text})"
-                      elif content_type and content_type not in {"application/octet-stream", "binary/octet-stream"}:
-                          label = f"{name} ({content_type})"
-                      else:
-                          label = name
-                      asset_lines.append(f"- [{label}]({download_url})")
+                      line = _format_release_asset_line(asset)
+                      if line:
+                          asset_lines.append(line)
                   if asset_lines:
                       total_assets = len(asset_lines)
                       shown_asset_lines = asset_lines[:MAX_RELEASE_ASSETS_LISTED]
@@ -2254,81 +3446,202 @@ jobs:
           
               return tag, release_url, author, notes
           
-          def send_release(release, ping, note=None, applied_tags=None, ping_mode=None, ping_id=None):
+          def _build_release_part_components(
+              index,
+              total,
+              pieces,
+              title,
+              meta_block,
+              notes_heading,
+              ping_text,
+              ping_mentions,
+          ):
+              """Build Discord components for one release notification part."""
+              components = []
+              mentions = {}
+              if index == 1 and ping_text:
+                  components.append({"type": 10, "content": ping_text})
+                  mentions = ping_mentions
+
+              container = []
+              if index == 1:
+                  container.extend([
+                      {"type": 10, "content": title},
+                      {"type": 14, "spacing": 1},
+                      {"type": 10, "content": meta_block},
+                      {"type": 14, "spacing": 1},
+                  ])
+                  heading_prefix = notes_heading
+              else:
+                  heading_prefix = f"## Release Notes (continued) — Part {index}/{total}:"
+
+              first_text_done = False
+              for kind, content in pieces:
+                  if kind == "sep":
+                      container.append({"type": 14, "spacing": 2})
+                  else:
+                      if not first_text_done:
+                          content = f"{heading_prefix}\n{content}"
+                          first_text_done = True
+                      container.append({"type": 10, "content": content})
+              components.append(make_container(container, CURRENT_ACCENT_COLOR))
+              return components, mentions
+
+
+          def send_release(
+              release,
+              ping,
+              note=None,
+              applied_tags=None,
+              ping_mode=None,
+              ping_id=None,
+              edited=False,
+              prior_message_ids=None,
+              prior_thread_id=None,
+          ):
+              """Post or update a release notification.
+
+              Returns a dict with message_ids, thread_id, and content_fingerprint for
+              durable edited-release tracking. When edited=True and prior_message_ids
+              are available, existing Discord messages are patched in place; otherwise
+              a new post is created.
+              """
               tag, release_url, author, notes = release_meta(release)
-          
-              title = f"## {PROJECT_NAME} Updated!"
+              content_fp = release_content_fingerprint(release)
+
+              if edited:
+                  title = f"## {PROJECT_NAME} Updated! (edited)"
+                  edit_note = "_This release was edited on GitHub._"
+                  note = f"{edit_note}\n\n{note}" if note else edit_note
+              else:
+                  title = f"## {PROJECT_NAME} Updated!"
+
               meta_lines = (
                   f"**Version:** {tag}\n"
                   f"**Author:** {author}\n"
                   f"**Release:** {release_url}"
               )
               meta_block = f"{note}\n\n{meta_lines}" if note else meta_lines
-              ping_text, ping_mentions = build_ping(ping_mode, ping_id) if ping else ("", {})
-          
+              effective_ping = True if edited else bool(ping)
+              ping_text, ping_mentions = build_ping(ping_mode, ping_id) if effective_ping else ("", {})
+
               notes_heading = "## Release Notes:"
-              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(notes_heading) + 1  # newline after the heading prefix
+              first_overhead = len(ping_text) + len(title) + len(meta_block) + len(notes_heading) + 1
               first_text_capacity = TOTAL_MESSAGE_BUDGET - first_overhead
               rest_text_capacity = TOTAL_MESSAGE_BUDGET - CONTINUATION_LABEL_OVERHEAD
               first_component_capacity = MAX_TOTAL_COMPONENTS - FIRST_FIXED_COMPONENTS
               rest_component_capacity = MAX_TOTAL_COMPONENTS - CONTINUATION_FIXED_COMPONENTS
-          
+
               messages = pack_messages(
                   notes, first_text_capacity, rest_text_capacity,
                   first_component_capacity, rest_component_capacity,
               )
               total = len(messages)
-          
+              prior_ids = [str(mid).strip() for mid in (prior_message_ids or []) if str(mid).strip()]
+              prior_thread = str(prior_thread_id).strip() if prior_thread_id else None
+
+              def _empty_result():
+                  return {
+                      "message_ids": [],
+                      "thread_id": None,
+                      "content_fingerprint": content_fp,
+                      "tag": tag,
+                  }
+
+              if edited and prior_ids:
+                  collected_ids = []
+                  thread_id = prior_thread
+                  try:
+                      for index in range(1, total + 1):
+                          pieces = messages[index - 1]
+                          components, mentions = _build_release_part_components(
+                              index, total, pieces, title, meta_block, notes_heading, ping_text, ping_mentions
+                          )
+                          if index <= len(prior_ids):
+                              message_id = prior_ids[index - 1]
+                              response = edit_discord_message(
+                                  message_id, components, mentions, thread_id=thread_id
+                              )
+                              returned_id = str(response.get("id") or message_id).strip()
+                              collected_ids.append(returned_id or message_id)
+                              print(
+                                  f"Edited Discord release message {message_id} for {REPO} {tag} "
+                                  f"(part {index}/{total})."
+                              )
+                          else:
+                              if CURRENT_REPO_TYPE == "forum":
+                                  if thread_id is None:
+                                      raise RuntimeError(
+                                          "Cannot append forum continuation parts without a thread_id."
+                                      )
+                                  response = send_discord(components, mentions, thread_id=thread_id)
+                              else:
+                                  response = send_discord(components, mentions)
+                              new_id = str(response.get("id") or "").strip()
+                              if new_id:
+                                  collected_ids.append(new_id)
+                              if CURRENT_REPO_TYPE == "forum" and response.get("channel_id"):
+                                  thread_id = str(response.get("channel_id"))
+                              print(
+                                  f"Posted additional release part {index}/{total} for edited {REPO} {tag}."
+                              )
+                      return {
+                          "message_ids": collected_ids,
+                          "thread_id": thread_id,
+                          "content_fingerprint": content_fp,
+                          "tag": tag,
+                      }
+                  except (DiscordThreadGoneError, DiscordPermanentError) as error:
+                      print(
+                          f"Could not edit prior Discord release message(s) for {REPO} {tag}: {error}. "
+                          "Posting a fresh release notification instead."
+                      )
+                  except Exception as error:
+                      print(
+                          f"Unexpected error editing release message(s) for {REPO} {tag}: {error}. "
+                          "Posting a fresh release notification instead."
+                      )
+
               if CURRENT_REPO_TYPE != "forum":
                   fingerprint = delivery_fingerprint(messages, title, meta_block, "release")
-                  start_index = _normal_delivery_start(tag, total, fingerprint)
+                  start_index = 1 if edited else _normal_delivery_start(tag, total, fingerprint)
                   if start_index > total:
                       clear_delivery_progress()
-                      return
-          
+                      return _empty_result()
+
+                  collected_ids = list(prior_ids[: start_index - 1]) if not edited else []
                   for index in range(start_index, total + 1):
                       pieces = messages[index - 1]
-                      components = []
-                      mentions = {}
-                      if index == 1 and ping_text:
-                          components.append({"type": 10, "content": ping_text})
-                          mentions = ping_mentions
-          
-                      container = []
-                      if index == 1:
-                          container.extend([
-                              {"type": 10, "content": title},
-                              {"type": 14, "spacing": 1},
-                              {"type": 10, "content": meta_block},
-                              {"type": 14, "spacing": 1},
-                          ])
-                          heading_prefix = notes_heading
-                      else:
-                          heading_prefix = f"## Release Notes (continued) — Part {index}/{total}:"
-          
-                      first_text_done = False
-                      for kind, content in pieces:
-                          if kind == "sep":
-                              container.append({"type": 14, "spacing": 2})
-                          else:
-                              if not first_text_done:
-                                  content = f"{heading_prefix}\n{content}"
-                                  first_text_done = True
-                              container.append({"type": 10, "content": content})
-                      components.append(make_container(container, CURRENT_ACCENT_COLOR))
-                      send_discord(components, mentions)
-                      save_delivery_progress(REPO, "release", tag, index + 1, total, fingerprint)
+                      components, mentions = _build_release_part_components(
+                          index, total, pieces, title, meta_block, notes_heading, ping_text, ping_mentions
+                      )
+                      response = send_discord(components, mentions)
+                      new_id = str(response.get("id") or "").strip()
+                      if new_id:
+                          collected_ids.append(new_id)
+                      if not edited:
+                          save_delivery_progress(REPO, "release", tag, index + 1, total, fingerprint)
                   clear_delivery_progress()
-                  return
-          
-              forum_title = make_forum_title(f"{PROJECT_NAME} Updated! — {tag}")
+                  return {
+                      "message_ids": collected_ids,
+                      "thread_id": None,
+                      "content_fingerprint": content_fp,
+                      "tag": tag,
+                  }
+
+              forum_title_base = f"{PROJECT_NAME} Updated! — {tag}"
+              if edited:
+                  forum_title_base = f"{PROJECT_NAME} Updated! (edited) — {tag}"
+              forum_title = make_forum_title(forum_title_base)
               forum_fingerprint = delivery_fingerprint(messages, title, meta_block, "release")
-              progress = load_thread_progress()
+              progress = None if edited else load_thread_progress()
               thread_id = None
               start_index = 1
-          
+              collected_ids = []
+
               if (
-                  progress
+                  not edited
+                  and progress
                   and progress.get("repo", REPO) == REPO
                   and progress.get("kind") == "release"
                   and progress.get("item_id") == tag
@@ -2354,8 +3667,8 @@ jobs:
                           start_index = 1
                       else:
                           print(f"Resuming Forum post {thread_id} for release {tag} at part {start_index}/{total}.")
-          
-              if progress and (
+
+              if not edited and progress and (
                   progress.get("repo", REPO) != REPO
                   or progress.get("kind") != "release"
                   or progress.get("item_id") != tag
@@ -2365,51 +3678,51 @@ jobs:
                       f"kind={progress.get('kind', 'unknown')}, item={progress.get('item_id', 'unknown')}) "
                       f"while processing repo={REPO}, item={tag}."
                   )
-          
+
               for index in range(start_index, total + 1):
                   pieces = messages[index - 1]
-                  components = []
-                  mentions = {}
-                  if index == 1 and ping_text:
-                      components.append({"type": 10, "content": ping_text})
-                      mentions = ping_mentions
-          
-                  container = []
-                  if index == 1:
-                      container.extend([
-                          {"type": 10, "content": title},
-                          {"type": 14, "spacing": 1},
-                          {"type": 10, "content": meta_block},
-                          {"type": 14, "spacing": 1},
-                      ])
-                      heading_prefix = notes_heading
-                  else:
-                      heading_prefix = f"## Release Notes (continued) — Part {index}/{total}:"
-          
-                  first_text_done = False
-                  for kind, content in pieces:
-                      if kind == "sep":
-                          container.append({"type": 14, "spacing": 2})
-                      else:
-                          if not first_text_done:
-                              content = f"{heading_prefix}\n{content}"
-                              first_text_done = True
-                          container.append({"type": 10, "content": content})
-                  components.append(make_container(container, CURRENT_ACCENT_COLOR))
-          
+                  components, mentions = _build_release_part_components(
+                      index, total, pieces, title, meta_block, notes_heading, ping_text, ping_mentions
+                  )
+
                   if index == 1 and thread_id is None:
                       response = send_discord(components, mentions, thread_name=forum_title, applied_tags=applied_tags)
                       thread_id = response.get("channel_id")
                       if not thread_id:
                           raise RuntimeError("Discord created the Forum post but did not return its thread/channel ID.")
-                      save_thread_progress(REPO, "release", tag, thread_id, 2, total, forum_title, forum_fingerprint)
+                      new_id = str(response.get("id") or "").strip()
+                      if new_id:
+                          collected_ids.append(new_id)
+                      if not edited:
+                          save_thread_progress(REPO, "release", tag, thread_id, 2, total, forum_title, forum_fingerprint)
                   else:
-                      thread_id = send_forum_part(
-                          components, mentions, index, total, forum_title, "release", tag, thread_id, applied_tags
-                      )
-                      save_thread_progress(REPO, "release", tag, thread_id, index + 1, total, forum_title, forum_fingerprint)
-          
+                      try:
+                          response = send_discord(components, mentions, thread_id=thread_id)
+                          new_id = str(response.get("id") or "").strip()
+                          if new_id:
+                              collected_ids.append(new_id)
+                      except DiscordThreadGoneError:
+                          thread_id = send_forum_part(
+                              components, mentions, index, total, forum_title, "release", tag, thread_id, applied_tags
+                          )
+                      else:
+                          if not edited:
+                              save_thread_progress(
+                                  REPO, "release", tag, thread_id, index + 1, total, forum_title, forum_fingerprint
+                              )
+                          continue
+                      if not edited:
+                          save_thread_progress(
+                              REPO, "release", tag, thread_id, index + 1, total, forum_title, forum_fingerprint
+                          )
+
               clear_thread_progress()
+              return {
+                  "message_ids": collected_ids,
+                  "thread_id": str(thread_id) if thread_id else None,
+                  "content_fingerprint": content_fp,
+                  "tag": tag,
+              }
           
           
           def monitor_releases(config):
@@ -2419,28 +3732,148 @@ jobs:
               if applied_tag_ids:
                   print(f"Forum tags configured for {REPO}: {', '.join(applied_tag_ids)}")
           
-              releases = get_recent_releases()
+              etag, last_modified = load_etag_state(REPO, "release")
+              try:
+                  releases = get_recent_releases(etag=etag, last_modified=last_modified)
+              except GitHubNotModified:
+                  _clear_incompatible_progress(set())
+                  print(f"Releases for {REPO} unchanged (HTTP 304).")
+                  return {
+                      "notifications": 0,
+                      "forum_posts": 0,
+                      "new_releases": 0,
+                      "last_seen_release": None,
+                      "last_detected_release": None,
+                  }
               if not releases:
                   _clear_incompatible_progress(set())
                   print(f"No published releases found for {REPO}.")
-                  return ping_sent
+                  return {"notifications": 0, "forum_posts": 0, "new_releases": 0, "last_seen_release": None, "last_detected_release": None}
           
-              latest_tag = releases[0].get("tag_name", "").strip()
+              latest_release = releases[0]
+              latest_tag = latest_release.get("tag_name", "").strip()
               old_tag = STATE.read_text().strip() if STATE.exists() else ""
-          
+              current_fingerprint = release_content_fingerprint(latest_release)
+              notify_state = load_release_notify_state(REPO)
+              webhook_fp = _webhook_fingerprint()
+
+              def _seen_release_payload(release_obj):
+                  return {
+                      "tag": release_obj.get("tag_name"),
+                      "url": release_obj.get("html_url"),
+                      "published_at_epoch": _iso_to_epoch(release_obj.get("published_at")),
+                      "created_at_epoch": _iso_to_epoch(release_obj.get("created_at")),
+                  }
+
               if latest_tag == old_tag:
                   _clear_incompatible_progress(set())
-                  print(f"No new release for {REPO}.")
-                  return ping_sent
-          
+                  stored_tag = str(notify_state.get("tag") or "").strip()
+                  stored_fp = str(notify_state.get("fingerprint") or "").strip()
+
+                  if stored_tag != latest_tag or not stored_fp:
+                      keep_ids = (
+                          notify_state.get("message_ids") or []
+                          if stored_tag == latest_tag
+                          else []
+                      )
+                      keep_thread = (
+                          notify_state.get("thread_id")
+                          if stored_tag == latest_tag
+                          else None
+                      )
+                      save_release_notify_state(
+                          REPO,
+                          latest_tag,
+                          current_fingerprint,
+                          message_ids=keep_ids,
+                          thread_id=keep_thread,
+                          webhook_fingerprint=webhook_fp,
+                      )
+                      print(
+                          f"Recorded release content fingerprint for {REPO} {latest_tag} "
+                          "(no edit notification; baseline established for latest release only)."
+                      )
+                      return {
+                          "notifications": 0,
+                          "forum_posts": 0,
+                          "new_releases": 0,
+                          "last_seen_release": _seen_release_payload(latest_release),
+                          "last_detected_release": None,
+                      }
+
+                  if stored_fp == current_fingerprint:
+                      return {
+                          "notifications": 0,
+                          "forum_posts": 0,
+                          "new_releases": 0,
+                          "last_seen_release": _seen_release_payload(latest_release),
+                          "last_detected_release": None,
+                      }
+
+                  print(
+                      f"Latest release {latest_tag} for {REPO} was edited on GitHub "
+                      "(body and/or assets changed); updating the Discord notification."
+                  )
+                  prior_ids = []
+                  prior_thread = None
+                  if str(notify_state.get("webhook_fingerprint") or "") == webhook_fp:
+                      prior_ids = notify_state.get("message_ids") or []
+                      prior_thread = notify_state.get("thread_id")
+                  else:
+                      print(
+                          f"Webhook changed since the original {REPO} {latest_tag} notification; "
+                          "posting a fresh edited-release message instead of editing in place."
+                      )
+
+                  delivery = send_release(
+                      latest_release,
+                      ping=True,
+                      note=None,
+                      applied_tags=applied_tag_ids,
+                      ping_mode=config["ping_mode"],
+                      ping_id=config["ping_id"],
+                      edited=True,
+                      prior_message_ids=prior_ids,
+                      prior_thread_id=prior_thread,
+                  )
+                  save_release_notify_state(
+                      REPO,
+                      delivery.get("tag") or latest_tag,
+                      delivery.get("content_fingerprint") or current_fingerprint,
+                      message_ids=delivery.get("message_ids") or [],
+                      thread_id=delivery.get("thread_id"),
+                      webhook_fingerprint=webhook_fp,
+                  )
+                  return {
+                      "notifications": 1,
+                      "forum_posts": 1 if CURRENT_REPO_TYPE == "forum" else 0,
+                      "new_releases": 0,
+                      "last_seen_release": _seen_release_payload(latest_release),
+                      "last_detected_release": _seen_release_payload(latest_release),
+                  }
+
               STATE.parent.mkdir(parents=True, exist_ok=True)
-          
+
               if not old_tag:
                   if not NOTIFY_ON_INITIAL_RUN:
                       _clear_incompatible_progress(set())
                       STATE.write_text(latest_tag + "\n")
+                      save_release_notify_state(
+                          REPO,
+                          latest_tag,
+                          current_fingerprint,
+                          message_ids=[],
+                          thread_id=None,
+                          webhook_fingerprint=webhook_fp,
+                      )
                       print(f"First run for {REPO}: recording the latest release without sending a notification.")
-                      return ping_sent
+                      return {
+                          "notifications": 0,
+                          "forum_posts": 0,
+                          "new_releases": 0,
+                          "last_seen_release": _seen_release_payload(latest_release),
+                          "last_detected_release": None,
+                      }
                   new_releases = [releases[0]]
                   gap = False
               else:
@@ -2452,30 +3885,34 @@ jobs:
                   else:
                       new_releases = [releases[0]]
                       gap = True
-          
+
+              total_new_releases = len(new_releases)
+              all_detected_releases = list(new_releases)
               overflow = 0
               if len(new_releases) > MAX_RELEASES_PER_RUN:
                   overflow = len(new_releases) - MAX_RELEASES_PER_RUN
                   new_releases = new_releases[-MAX_RELEASES_PER_RUN:]
-          
+
               selected_release_ids = {r.get("tag_name", "").strip() for r in new_releases}
               _clear_incompatible_progress(selected_release_ids)
-          
+
               print(
                   f"New releases to report for {REPO}: {len(new_releases)}"
                   + (f", {overflow} more not shown individually" if overflow else "")
                   + (", gap detected (older release not found in history)" if gap else "")
               )
-          
+
               note = None
               if gap:
                   note = "_Could not find the last-seen release in recent history - showing the latest release only._"
               elif overflow:
                   note = f"_{overflow} earlier release(s) in this batch were not posted individually._"
-          
+
+              last_delivery = None
+              last_release_obj = None
               for i, release in enumerate(new_releases):
                   should_ping = not ping_sent
-                  send_release(
+                  last_delivery = send_release(
                       release,
                       ping=should_ping,
                       note=(note if i == 0 else None),
@@ -2483,14 +3920,60 @@ jobs:
                       ping_mode=config["ping_mode"],
                       ping_id=config["ping_id"],
                   )
+                  last_release_obj = release
                   if should_ping:
                       ping_sent = True
-                  STATE.write_text(release.get("tag_name", "").strip() + "\n")
+                  release_tag = release.get("tag_name", "").strip()
+                  STATE.write_text(release_tag + "\n")
+
+              if last_delivery and last_release_obj is not None:
+                  newest_tag = last_delivery.get("tag") or last_release_obj.get("tag_name", "").strip()
+                  save_release_notify_state(
+                      REPO,
+                      newest_tag,
+                      last_delivery.get("content_fingerprint")
+                      or release_content_fingerprint(last_release_obj),
+                      message_ids=last_delivery.get("message_ids") or [],
+                      thread_id=last_delivery.get("thread_id"),
+                      webhook_fingerprint=webhook_fp,
+                  )
+                  print(
+                      f"Tracking edited-release state for latest release only: {REPO} {newest_tag}."
+                  )
+
+              detected_release = all_detected_releases[-1] if all_detected_releases else latest_release
+              return {
+                  "notifications": len(new_releases),
+                  "forum_posts": len(new_releases) if CURRENT_REPO_TYPE == "forum" else 0,
+                  "new_releases": total_new_releases,
+                  "last_seen_release": _seen_release_payload(latest_release),
+                  "last_detected_release": _seen_release_payload(detected_release),
+              }
           
-              print(f"Discord notification(s) sent and state saved for {REPO}.")
-              return ping_sent
           
-          
+          def _commit_stats_entry(commit):
+              """Build the stats payload for a commit, including any version found in the message."""
+              if not commit:
+                  return None
+              raw_message = (commit.get("commit") or {}).get("message", "") or ""
+              first_line = raw_message.splitlines()[0][:200] if raw_message else ""
+              analysis = commit.get("_update_analysis")
+              version = ""
+              if isinstance(analysis, dict):
+                  version = str(analysis.get("version") or "").strip()
+              if not version or version.lower() == "unknown":
+                  version = extract_update_version(raw_message)
+              if version and version.lower() == "unknown":
+                  version = ""
+              return {
+                  "sha": commit.get("sha"),
+                  "url": commit.get("html_url"),
+                  "message": first_line,
+                  "version": version,
+                  "committed_at_epoch": _iso_to_epoch((commit.get("commit") or {}).get("author", {}).get("date")),
+              }
+
+
           def monitor_commits(config):
               configure_repository(config, "commit")
               ping_sent = False
@@ -2498,19 +3981,39 @@ jobs:
               if applied_tag_ids:
                   print(f"Forum tags configured for {REPO}: {', '.join(applied_tag_ids)}")
           
-              commits = get_recent_commits(max_pages=1)
+              etag, last_modified = load_etag_state(REPO, "commit")
+              try:
+                  commits = get_recent_commits(
+                      max_pages=1, etag=etag, last_modified=last_modified
+                  )
+              except GitHubNotModified:
+                  _clear_incompatible_progress(set())
+                  print(f"Commits for {REPO} unchanged (HTTP 304).")
+                  return {
+                      "notifications": 0,
+                      "forum_posts": 0,
+                      "new_commits": 0,
+                      "last_seen_commit": None,
+                      "last_detected_commit": None,
+                  }
               if not commits:
                   _clear_incompatible_progress(set())
                   print(f"No commits found for {REPO}.")
-                  return ping_sent
+                  return {"notifications": 0, "forum_posts": 0, "new_commits": 0, "last_seen_commit": None, "last_detected_commit": None}
           
-              latest_sha = commits[0]["sha"]
+              latest_commit = commits[0]
+              latest_sha = latest_commit["sha"]
               old_sha = STATE.read_text().strip() if STATE.exists() else ""
           
               if latest_sha == old_sha:
                   _clear_incompatible_progress(set())
-                  print(f"No new commit for {REPO}.")
-                  return ping_sent
+                  return {
+                      "notifications": 0,
+                      "forum_posts": 0,
+                      "new_commits": 0,
+                      "last_seen_commit": _commit_stats_entry(latest_commit),
+                      "last_detected_commit": None,
+                  }
           
               STATE.parent.mkdir(parents=True, exist_ok=True)
           
@@ -2519,7 +4022,13 @@ jobs:
                       _clear_incompatible_progress(set())
                       STATE.write_text(latest_sha + "\n")
                       print(f"First run for {REPO}: recording the latest commit without sending a notification.")
-                      return ping_sent
+                      return {
+                          "notifications": 0,
+                          "forum_posts": 0,
+                          "new_commits": 0,
+                          "last_seen_commit": _commit_stats_entry(latest_commit),
+                          "last_detected_commit": None,
+                      }
                   raw_new_commits = [commits[0]]
                   gap = False
               else:
@@ -2548,16 +4057,23 @@ jobs:
                   _clear_incompatible_progress(set())
                   STATE.write_text(latest_sha + "\n")
                   print(f"No commits matched the configured filters for {REPO}; advanced state past {len(raw_new_commits)} new commit(s).")
-                  return ping_sent
-          
+                  return {
+                      "notifications": 0,
+                      "forum_posts": 0,
+                      "new_commits": 0,
+                      "last_seen_commit": _commit_stats_entry(latest_commit),
+                      "last_detected_commit": None,
+                  }
+
+              total_new_commits = len(eligible_commits)
+              all_detected_commits = list(eligible_commits)
               overflow = 0
               if len(eligible_commits) > MAX_COMMITS_PER_RUN:
                   overflow = len(eligible_commits) - MAX_COMMITS_PER_RUN
                   eligible_commits = eligible_commits[-MAX_COMMITS_PER_RUN:]
           
               selected_commit_ids = {c["sha"] for c in eligible_commits}
-              if gap or overflow:
-                  _clear_incompatible_progress(selected_commit_ids)
+              _clear_incompatible_progress(selected_commit_ids)
           
               if overflow:
                   overflow_note = f"_{overflow} earlier matching commit(s) in this batch were not posted individually._"
@@ -2581,14 +4097,30 @@ jobs:
                   STATE.write_text(commit["sha"] + "\n")
           
               STATE.write_text(latest_sha + "\n")
-              print(f"Discord notification(s) sent and state saved for {REPO}.")
-              return ping_sent
+              detected_commit = all_detected_commits[-1] if all_detected_commits else latest_commit
+              return {
+                  "notifications": len(eligible_commits),
+                  "forum_posts": len(eligible_commits) if CURRENT_REPO_TYPE == "forum" else 0,
+                  "new_commits": total_new_commits,
+                  "last_seen_commit": _commit_stats_entry(latest_commit),
+                  "last_detected_commit": _commit_stats_entry(detected_commit),
+              }
           
           def main():
-              configs = parse_repositories(REPOS_RAW)
               event_name = os.environ.get("GITHUB_EVENT_NAME", "")
               validation_only = event_name in {"push", "pull_request"}
-          
+              print(
+                  f"Event: {event_name or 'unknown'} | "
+                  f"mode: {'VALIDATION ONLY' if validation_only else 'LIVE MONITOR'} | "
+                  f"config: {CONFIG_FILE}"
+              )
+
+              try:
+                  configs = parse_repositories(REPOS_RAW)
+              except Exception as config_error:
+                  print(f"::error::Repository config validation failed: {config_error}")
+                  raise
+
               print(f"Config validation passed: {len(configs)} repository block(s) are valid.")
               for config in configs:
                   enabled_label = "enabled" if config.get("enabled", True) else "disabled"
@@ -2597,52 +4129,134 @@ jobs:
                       f"monitor={config['monitor_type']} | ping={config['ping_mode']} | {enabled_label}"
                   )
 
-              # Push and pull-request runs are validation-only. The parser above is the same parser
-              # used by scheduled/manual monitoring, so config cannot drift between validation and use.
-              # These runs never call Discord or GitHub's repository API and never touch monitor state.
               if validation_only:
+                  print(
+                      "Validation-only run complete. "
+                      "Config and workflow parse succeeded; skipping GitHub checks, "
+                      "Discord notifications, and state updates."
+                  )
+                  print("::notice::Repo Monitor config validation succeeded.")
                   return
 
-              # The inactivity reminder is global. If the configured global webhook is used by any
-              # enabled Forum repository, create the reminder as a Forum post; otherwise send it normally.
-              global INACTIVITY_FORUM
-              INACTIVITY_FORUM = bool(
-                  DEFAULT_WEBHOOK
-                  and any(
-                      c.get("enabled", True)
-                      and c["repo_type"] == "forum"
-                      and c["webhook"] == DEFAULT_WEBHOOK
-                      for c in configs
+              stats_state = load_stats_state() if STATS_ENABLED else None
+
+              active_configs = [config for config in configs if config.get("enabled", True)]
+              disabled_configs = [config for config in configs if not config.get("enabled", True)]
+              if disabled_configs:
+                  print(
+                      f"Skipping {len(disabled_configs)} disabled repositor"
+                      f"{'y' if len(disabled_configs) == 1 else 'ies'}: "
+                      + ", ".join(config["repo"] for config in disabled_configs)
                   )
-              )
-              try:
-                  maybe_send_inactivity_reminder()
-              except Exception as error:
-                  # A workflow-level reminder must never prevent repository monitoring from running.
-                  print(f"Inactivity reminder failed; continuing repository monitoring: {error}")
-          
+
+              if stats_state is not None:
+                  _record_stats_run_start(stats_state, len(active_configs))
+                  _stats_prune_removed_repos(
+                      stats_state, [config["repo"] for config in configs]
+                  )
+                  for config in configs:
+                      repo_state = _stats_repo_state(stats_state, config["repo"])
+                      repo_state["monitor_kinds"] = []
+                      _stats_set_monitor_kinds(repo_state, config.get("monitor_type"))
+                      if not config.get("enabled", True):
+                          repo_state["last_status"] = "Disabled"
+
               had_error = False
               github_rate_limit_blocked = False
-          
-              for config in configs:
-                  if not config.get("enabled", True):
-                      print(f"Skipping {config['repo']} because it is disabled (enabled: false). State is left untouched.")
-                      continue
+
+              def _prefetch_github_feed(config, kind):
+                  """Fetch one repo feed early so multiple repos overlap on the network."""
+                  repo = config["repo"]
+                  api_base = config["github_api_base_url"]
+                  if kind == "commit":
+                      url = f"{api_base}/repos/{repo}/commits?per_page=100"
+                      etag_kind = "commit"
+                  else:
+                      url = f"{api_base}/repos/{repo}/releases?per_page=30"
+                      etag_kind = "release"
+                  etag, last_modified = load_etag_state(repo, etag_kind)
+                  try:
+                      def build_request(
+                          request_url=url,
+                          request_etag=etag,
+                          request_last_modified=last_modified,
+                      ):
+                          return urllib.request.Request(
+                              request_url,
+                              headers=_github_request_headers(
+                                  request_etag, request_last_modified
+                              ),
+                          )
+
+                      body, resp_headers = fetch_with_retry(
+                          build_request, service="github", return_headers=True
+                      )
+                      new_etag = _header_value(resp_headers, "ETag") or etag
+                      new_last_modified = (
+                          _header_value(resp_headers, "Last-Modified") or last_modified
+                      )
+                      data = json.loads(body)
+                      if kind == "release":
+                          data = [
+                              release
+                              for release in data
+                              if not release.get("draft")
+                              and not release.get("prerelease")
+                              and str(release.get("tag_name") or "").strip()
+                          ]
+                      return (repo, kind, "ok", data, new_etag, new_last_modified)
+                  except GitHubNotModified:
+                      return (repo, kind, "not_modified", None, etag, last_modified)
+                  except Exception as error:
+                      return (repo, kind, "error", error, None, None)
+
+              prefetch_tasks = []
+              for config in active_configs:
+                  if config["monitor_type"] == "commits":
+                      prefetch_tasks.append((config, "commit"))
+                  if config["monitor_type"] == "releases":
+                      prefetch_tasks.append((config, "release"))
+
+              PREFETCH_CACHE.clear()
+              if prefetch_tasks:
+                  workers = max(1, min(MAX_GITHUB_PREFETCH_WORKERS, len(prefetch_tasks)))
+                  print(
+                      f"Prefetching {len(prefetch_tasks)} GitHub feed(s) "
+                      f"with up to {workers} worker(s)..."
+                  )
+                  with ThreadPoolExecutor(max_workers=workers) as executor:
+                      futures = [
+                          executor.submit(_prefetch_github_feed, config, kind)
+                          for config, kind in prefetch_tasks
+                      ]
+                      for future in as_completed(futures):
+                          repo, kind, status, payload, new_etag, new_lm = future.result()
+                          if status == "ok":
+                              PREFETCH_CACHE[(repo, kind)] = (
+                                  "ok",
+                                  payload,
+                                  new_etag,
+                                  new_lm,
+                              )
+                          elif status == "not_modified":
+                              PREFETCH_CACHE[(repo, kind)] = ("not_modified",)
+                              print(f"Prefetch {repo} {kind}: HTTP 304 Not Modified")
+                          else:
+                              PREFETCH_CACHE[(repo, kind)] = ("error", payload)
+                              print(f"Prefetch {repo} {kind} failed: {payload}")
+
+              for config in active_configs:
                   if github_rate_limit_blocked:
                       print(f"Skipping {config['repo']} because the GitHub primary rate limit already blocked this run.")
                       continue
-          
+
                   kinds = []
-                  if config["monitor_type"] in {"commits", "both"}:
+                  if config["monitor_type"] == "commits":
                       kinds.append("commit")
-                  if config["monitor_type"] in {"releases", "both"}:
+                  if config["monitor_type"] == "releases":
                       kinds.append("release")
-          
-                  # If the config was changed since an earlier run, discard failure state for
-                  # monitor kinds that are no longer active for this repository. Failure-state files
-                  # use the plural config keys ("commits"/"releases"), not the internal singular names.
+
                   active_kinds = {"commits" if kind == "commit" else "releases" for kind in kinds}
-          
                   permanent_path = permanent_failure_state_path_for_repo(config["repo"])
                   permanent_state = _load_json_state(permanent_path)
                   if permanent_state:
@@ -2652,23 +4266,27 @@ jobs:
                           _save_json_state(permanent_path, permanent_state)
                       else:
                           _clear_json_state(permanent_path)
-          
+
                   for inactive_kind in {"commits", "releases"} - active_kinds:
                       _clear_json_state(failure_state_path_for_repo(config["repo"], inactive_kind))
-          
+
                   for kind in kinds:
                       monitor_config = dict(config)
                       monitor_config["monitor_type"] = "commits" if kind == "commit" else "releases"
                       try:
                           if kind == "commit":
-                              monitor_commits(monitor_config)
+                              result = monitor_commits(monitor_config)
                           else:
-                              monitor_releases(monitor_config)
+                              result = monitor_releases(monitor_config)
                           record_repo_success(monitor_config)
+                          if stats_state is not None:
+                              _record_stats_repo_result(stats_state, monitor_config, result)
                       except GitHubRateLimitError as error:
                           had_error = True
                           github_rate_limit_blocked = True
                           record_global_rate_limit_failure(monitor_config, error.reset_epoch)
+                          if stats_state is not None:
+                              _record_stats_rate_limit(stats_state, monitor_config, error.reset_epoch)
                           print(
                               f"GitHub primary rate limit exhausted while checking {config['repo']}; "
                               "skipping the remaining repositories for this run."
@@ -2677,69 +4295,156 @@ jobs:
                       except GitHubPermanentError as error:
                           had_error = True
                           record_repo_failure(monitor_config, error, permanent=True)
+                          if stats_state is not None:
+                              _record_stats_error(stats_state, monitor_config, error)
                           print(f"Permanent GitHub error while monitoring {config['repo']}: {error}")
                       except DiscordPermanentError as error:
                           had_error = True
                           record_repo_failure(monitor_config, error, permanent=True)
+                          if stats_state is not None:
+                              _record_stats_error(stats_state, monitor_config, error)
                           print(f"Permanent Discord error while monitoring {config['repo']}: {error}")
                       except Exception as error:
                           had_error = True
                           record_repo_failure(monitor_config, error, permanent=False)
+                          if stats_state is not None:
+                              _record_stats_error(stats_state, monitor_config, error)
                           print(f"Error while monitoring {kind}s for {config['repo']}: {error}")
-          
+
               if not github_rate_limit_blocked:
                   record_global_rate_limit_success()
-          
+
+              if stats_state is not None:
+                  finalize_stats_dashboard(stats_state)
+
               if had_error:
                   raise SystemExit(1)
-          
-          
-          
-          main()
+
+
+          def _record_stats_fatal_error(state, message):
+              """Bump error counters when the run dies outside per-repo handlers."""
+              if state is None:
+                  return
+              # Open a this-run window for error counts, but do not push Next check out —
+              # error-driven stats edits must keep the existing schedule countdown.
+              repos_total = 0
+              try:
+                  repos_total = int((state.get("current") or {}).get("repos_total", 0) or 0)
+              except (TypeError, ValueError):
+                  repos_total = 0
+              _record_stats_run_start(state, repos_total, reset_schedule=False)
+              now = _now_epoch()
+              state["current"]["errors"] = _coerce_nonneg_int(state["current"].get("errors")) + 1
+              _bump_lifetime_errors(state, 1)
+              error_info = {
+                  "repo": None,
+                  "kind": None,
+                  "message": str(message)[:500],
+                  "timestamp": now,
+              }
+              state["current"]["last_error"] = error_info
+              state["last_known"]["last_error"] = error_info
+              save_stats_state(state)
+              print(
+                  f"Recorded fatal stats error "
+                  f"(lifetime errors now {state['lifetime']['errors']}; "
+                  f"next_check preserved={state['current'].get('next_check')})."
+              )
+              send_incident_log(
+                  "fatal",
+                  str(message),
+                  repo=None,
+                  details={"Scope": "workflow"},
+              )
+
+
+          try:
+              main()
+          except SystemExit:
+              raise
+          except Exception as error:
+              print(f"Fatal monitor error: {error}")
+              if STATS_ENABLED:
+                  try:
+                      fatal_stats = load_stats_state()
+                      _record_stats_fatal_error(fatal_stats, error)
+                      finalize_stats_dashboard(fatal_stats)
+                  except Exception as stats_error:
+                      print(f"Could not update stats dashboard after fatal error: {stats_error}")
+              raise
           PY
 
+      # Persist on every event (not only workflow_dispatch). Config errors on push/PR
+      # update the stats dashboard in the workspace; without these steps the next cron
+      # run reloads the old counter from git and rolls Lifetime Errors backward.
+      - name: Save stats dashboard message cache
+        if: ${{ !cancelled() && (success() || failure()) }}
+        uses: actions/cache/save@v4
+        with:
+          path: .github/monitor-state/_stats.cache.json
+          key: repo-monitor-stats-msg-${{ github.run_id }}-${{ github.run_attempt }}
+
+
       - name: Save monitor state
-        if: ${{ !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}   # never write state during push/PR validation-only runs
+        if: ${{ !cancelled() && (success() || failure()) }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_EDITOR=true
 
-          # Thread-resume files now live under $STATE_DIR alongside the regular
-          # per-repo state files, so one `git add` picks up everything: new state,
-          # updated state, AND a cleared (deleted) resume file once a post finishes.
-          if [ -d "$STATE_DIR" ]; then
-            find "$STATE_DIR" -type f -name '*.tmp' -delete
-            git add -A -- "$STATE_DIR"
-          fi
-
-          if git diff --cached --quiet; then
-            echo "No state changes to commit."
+          if [ ! -d "$STATE_DIR" ]; then
+            echo "No state directory; nothing to save."
             exit 0
           fi
+          find "$STATE_DIR" -type f -name '*.tmp' -delete
 
-          git commit -m "Update monitor state ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          # Show durable error counter before commit so logs prove what is being saved.
+          if [ -f "$STATE_DIR/_stats.json" ]; then
+            echo "Stats lifetime errors in workspace:"
+            python3 -c "import json; d=json.load(open('$STATE_DIR/_stats.json')); print(d.get('lifetime',{}).get('errors'), d.get('last_known',{}).get('lifetime_errors_high_water'))" 2>/dev/null || true
+          fi
+          if [ -f "$STATE_DIR/_lifetime.json" ]; then
+            echo "Lifetime file contents:"
+            cat "$STATE_DIR/_lifetime.json" || true
+          fi
 
-          # Retry the rebase+push a few times: if another monitor workflow run
-          # (e.g. this template's non-forum counterpart, which shares the same
-          # default concurrency group) pushes to this branch at the same
-          # moment, a single pull+push can lose the race. Each state file is
-          # repo-specific, so there's never a real conflict to resolve here -
-          # just a timing window to retry through.
+          STATE_SNAPSHOT="$(mktemp -d)"
+          cp -a "$STATE_DIR/." "$STATE_SNAPSHOT/"
+
           for attempt in 1 2 3 4 5; do
-            if git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}"; then
-              echo "State pushed successfully."
+            echo "State push attempt $attempt/5..."
+            git fetch origin "${GITHUB_REF_NAME}"
+
+            git reset --hard "origin/${GITHUB_REF_NAME}"
+
+            rm -rf "$STATE_DIR"
+            mkdir -p "$STATE_DIR"
+            cp -a "$STATE_SNAPSHOT/." "$STATE_DIR/"
+
+            git add -A -- "$STATE_DIR"
+            git reset HEAD -- "$STATE_DIR/_stats.cache.json" "$STATE_DIR/_stats.cache.json.tmp" 2>/dev/null || true
+            rm -f "$STATE_DIR/_stats.cache.json.tmp"
+
+            if git diff --cached --quiet; then
+              echo "No state changes to commit relative to origin/${GITHUB_REF_NAME}."
+              rm -rf "$STATE_SNAPSHOT"
               exit 0
             fi
-            echo "Push attempt $attempt/5 failed, retrying..."
+
+            git commit -m "Update monitor state ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "State pushed successfully."
+              rm -rf "$STATE_SNAPSHOT"
+              exit 0
+            fi
+
+            echo "Push attempt $attempt/5 lost a race; retrying..."
             sleep $((attempt * 3))
           done
 
+          rm -rf "$STATE_SNAPSHOT"
           echo "::error::Failed to push state update after multiple attempts."
           exit 1
 
-      - name: Save 59-day inactivity reminder state
-        if: ${{ !cancelled() && steps.monitor.outputs.reminder_sent == 'true' && steps.inactivity-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: .github/.workflow-inactivity-reminder.marker
-          key: ${{ steps.inactivity.outputs.cache_key }}
